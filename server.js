@@ -10,10 +10,6 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const sessions = {};
 
-function sessionKey(url) {
-  return url.toLowerCase().trim();
-}
-
 function writeFrame(res, buf) {
   try {
     res.write(`--FRAME\r\nContent-Type: image/jpeg\r\nContent-Length: ${buf.length}\r\n\r\n`);
@@ -22,9 +18,21 @@ function writeFrame(res, buf) {
   } catch (_) {}
 }
 
-async function getOrCreateSession(url, width, height) {
-  const key = sessionKey(url);
-  if (sessions[key]) return sessions[key];
+async function getOrCreateSession(cid, url, width, height) {
+  if (sessions[cid]) {
+    const s = sessions[cid];
+    if (s.url !== url) {
+      s.url = url;
+      s.navigating = true;
+      try {
+        await s.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      } catch (e) {
+        console.error("[nav]", e.message);
+      }
+      s.navigating = false;
+    }
+    return s;
+  }
 
   const browser = await puppeteer.launch({
     headless: "new",
@@ -103,12 +111,12 @@ async function getOrCreateSession(url, width, height) {
     session.lastFrameMs = ms;
     if (ms > 120) {
       const q = Math.max(20, session.quality - 10);
-      const s = Math.max(0.4, session.scale - 0.1);
-      if (q !== session.quality || s !== session.scale) setQuality(q, s);
+      const sc = Math.max(0.4, session.scale - 0.1);
+      if (q !== session.quality || sc !== session.scale) setQuality(q, sc);
     } else if (ms < 40) {
       const q = Math.min(70, session.quality + 5);
-      const s = Math.min(1.0, session.scale + 0.05);
-      if (q !== session.quality || s !== session.scale) setQuality(q, s);
+      const sc = Math.min(1.0, session.scale + 0.05);
+      if (q !== session.quality || sc !== session.scale) setQuality(q, sc);
     }
   });
 
@@ -116,8 +124,9 @@ async function getOrCreateSession(url, width, height) {
     if (frame !== page.mainFrame()) return;
     if (session.navigating) return;
     const current = frame.url();
-    if (current && current !== "about:blank" && sessionKey(current) !== sessionKey(url)) {
+    if (current && current !== "about:blank" && current !== session.url) {
       session.driftUrl = current;
+      session.url = current;
     }
   });
 
@@ -129,18 +138,27 @@ async function getOrCreateSession(url, width, height) {
   }
   session.navigating = false;
 
-  sessions[key] = session;
+  sessions[cid] = session;
   return session;
+}
+
+async function destroySession(cid) {
+  const s = sessions[cid];
+  if (!s) return;
+  delete sessions[cid];
+  console.log(`[session] closing ${cid}`);
+  try { await s.browser.close(); } catch (_) {}
 }
 
 app.get("/stream", async (req, res) => {
   const url    = req.query.url || "https://earth.nullschool.net";
+  const cid    = req.query.cid || "default";
   const width  = parseInt(req.query.w) || 375;
   const height = parseInt(req.query.h) || 667;
 
   let session;
   try {
-    session = await getOrCreateSession(url, width, height);
+    session = await getOrCreateSession(cid, url, width, height);
   } catch (err) {
     res.status(500).send("Failed: " + err.message);
     return;
@@ -154,36 +172,21 @@ app.get("/stream", async (req, res) => {
   });
 
   session.listeners.add(res);
-  const cleanup = () => session.listeners.delete(res);
+
+  const cleanup = () => {
+    session.listeners.delete(res);
+    if (session.listeners.size === 0) {
+      destroySession(cid);
+    }
+  };
+
   req.on("close", cleanup);
   req.on("error", cleanup);
 });
 
-app.post("/input/back", (req, res) => {
-  const session = sessions[sessionKey(req.body.url)];
-  if (!session) return res.status(404).end();
-  session.page.goBack().catch(() => {});
-  res.end();
-});
-
-app.post("/input/forward", (req, res) => {
-  const session = sessions[sessionKey(req.body.url)];
-  if (!session) return res.status(404).end();
-  session.page.goForward().catch(() => {});
-  res.end();
-});
-
-app.post("/input/reload", async (req, res) => {
-  const { url } = req.body;
-  const session = sessions[sessionKey(url)];
-  if (!session) return res.status(404).end();
-  session.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
-  res.end();
-});
-
 app.post("/input/tap", async (req, res) => {
-  const { url, x, y } = req.body;
-  const session = sessions[sessionKey(url)];
+  const { cid, x, y } = req.body;
+  const session = sessions[cid];
   if (!session) return res.status(404).end();
   await session.page.evaluate(() => {
     if (document.activeElement) document.activeElement.blur();
@@ -193,31 +196,52 @@ app.post("/input/tap", async (req, res) => {
 });
 
 app.post("/input/scroll", (req, res) => {
-  const { url, dx, dy } = req.body;
-  const session = sessions[sessionKey(url)];
+  const { cid, dx, dy } = req.body;
+  const session = sessions[cid];
   if (!session) return res.status(404).end();
   session.page.mouse.wheel({ deltaX: dx, deltaY: dy }).catch(() => {});
   res.end();
 });
 
 app.post("/input/type", (req, res) => {
-  const { url, text } = req.body;
-  const session = sessions[sessionKey(url)];
+  const { cid, text } = req.body;
+  const session = sessions[cid];
   if (!session) return res.status(404).end();
   session.page.keyboard.type(text, { delay: 0 }).catch(() => {});
   res.end();
 });
 
 app.post("/input/key", (req, res) => {
-  const { url, key } = req.body;
-  const session = sessions[sessionKey(url)];
+  const { cid, key } = req.body;
+  const session = sessions[cid];
   if (!session) return res.status(404).end();
   session.page.keyboard.press(key).catch(() => {});
   res.end();
 });
 
+app.post("/input/back", (req, res) => {
+  const session = sessions[req.body.cid];
+  if (!session) return res.status(404).end();
+  session.page.goBack().catch(() => {});
+  res.end();
+});
+
+app.post("/input/forward", (req, res) => {
+  const session = sessions[req.body.cid];
+  if (!session) return res.status(404).end();
+  session.page.goForward().catch(() => {});
+  res.end();
+});
+
+app.post("/input/reload", (req, res) => {
+  const session = sessions[req.body.cid];
+  if (!session) return res.status(404).end();
+  session.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+  res.end();
+});
+
 app.get("/meta", async (req, res) => {
-  const session = sessions[sessionKey(req.query.url || "")];
+  const session = sessions[req.query.cid];
   if (!session) return res.json({ title: "Browsnex", driftUrl: null });
   try {
     const driftUrl = session.driftUrl;

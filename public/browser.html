@@ -120,6 +120,14 @@
   var kbdVal    = "";
   var menuOpen  = false;
 
+  var cid = (function () {
+    var stored = window.sessionStorage && sessionStorage.getItem("browsnex_cid");
+    if (stored) return stored;
+    var id = "c" + Math.random().toString(36).slice(2, 10);
+    try { sessionStorage.setItem("browsnex_cid", id); } catch (_) {}
+    return id;
+  }());
+
   var params = (function () {
     var q = {}, s = window.location.search.slice(1).split("&");
     for (var i = 0; i < s.length; i++) {
@@ -156,6 +164,7 @@
     var streamH = window.innerHeight - tbRect.bottom;
     stream.src = "/stream"
       + "?url=" + encodeURIComponent(url)
+      + "&cid=" + cid
       + "&w="   + W
       + "&h="   + Math.round(streamH);
   }
@@ -192,17 +201,17 @@
   menuBtn.onclick = function () { toggleMenu(); };
 
   backBtn.onclick = function () {
-    post("/input/back", { url: currentUrl });
+    post("/input/back", { cid: cid });
     closeMenu();
   };
 
   fwdBtn.onclick = function () {
-    post("/input/forward", { url: currentUrl });
+    post("/input/forward", { cid: cid });
     closeMenu();
   };
 
   reloadBtn.onclick = function () {
-    post("/input/reload", { url: currentUrl });
+    post("/input/reload", { cid: cid });
     closeMenu();
   };
 
@@ -215,7 +224,7 @@
   function pollMeta() {
     if (metaTimer) clearTimeout(metaTimer);
     var xhr = new XMLHttpRequest();
-    xhr.open("GET", "/meta?url=" + encodeURIComponent(currentUrl), true);
+    xhr.open("GET", "/meta?cid=" + cid, true);
     xhr.onreadystatechange = function () {
       if (xhr.readyState === 4 && xhr.status === 200) {
         try {
@@ -267,7 +276,7 @@
     var r  = stream.getBoundingClientRect();
     var sc = W / r.width;
     post("/input/scroll", {
-      url: currentUrl,
+      cid: cid,
       dx: (touchStartX - t.clientX) * sc,
       dy: (touchStartY - t.clientY) * sc
     });
@@ -283,26 +292,26 @@
     var dy = Math.abs(t.clientY - touchStartY);
     if (dx < 10 && dy < 10) {
       var c = streamCoords(t.clientX, t.clientY);
-      post("/input/tap", { url: currentUrl, x: c.x, y: c.y });
+      post("/input/tap", { cid: cid, x: c.x, y: c.y });
     }
   }, false);
 
   kbd.oninput = function () {
     var next = kbd.value;
     if (next.length > kbdVal.length) {
-      post("/input/type", { url: currentUrl, text: next.slice(kbdVal.length) });
+      post("/input/type", { cid: cid, text: next.slice(kbdVal.length) });
     }
     kbdVal = next;
   };
 
   kbd.onkeydown = function (e) {
     var code = e.keyCode || e.which;
-    if (code === 8)  post("/input/key", { url: currentUrl, key: "Backspace" });
-    if (code === 13) post("/input/key", { url: currentUrl, key: "Enter" });
-    if (code === 37) post("/input/key", { url: currentUrl, key: "ArrowLeft" });
-    if (code === 38) post("/input/key", { url: currentUrl, key: "ArrowUp" });
-    if (code === 39) post("/input/key", { url: currentUrl, key: "ArrowRight" });
-    if (code === 40) post("/input/key", { url: currentUrl, key: "ArrowDown" });
+    if (code === 8)  post("/input/key", { cid: cid, key: "Backspace" });
+    if (code === 13) post("/input/key", { cid: cid, key: "Enter" });
+    if (code === 37) post("/input/key", { cid: cid, key: "ArrowLeft" });
+    if (code === 38) post("/input/key", { cid: cid, key: "ArrowUp" });
+    if (code === 39) post("/input/key", { cid: cid, key: "ArrowRight" });
+    if (code === 40) post("/input/key", { cid: cid, key: "ArrowDown" });
   };
 
   startStream(currentUrl);
