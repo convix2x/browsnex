@@ -1,0 +1,25 @@
+{
+  "name": "browsnex",
+  "version": "1.0.0",
+  "description": "Browsnex (browse-next) is a way to browse modern pages in like iOS 6 safari",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/convix2x/browsnex.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/convix2x/browsnex/issues"
+  },
+  "homepage": "https://github.com/convix2x/browsnex#readme",
+  "dependencies": {
+    "express": "^5.2.1",
+    "puppeteer": "^24.40.0"
+  }
+}
