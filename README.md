@@ -1,6 +1,9 @@
 # Browsnex
 Browsnex (browse-next) is a way to browse modern pages in old browsers
 
+# Tested compatibility
+iPhone 5 (iOS 6)
+
 # Run
 install the deps with npm install, and then run server.js
 
