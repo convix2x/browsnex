@@ -21,21 +21,45 @@
       -webkit-box-align: center;
       -webkit-align-items: center;
       align-items: center;
-      padding: 4px 6px;
-      gap: 5px;
+      padding: 2px 4px;
+      gap: 3px;
     }
 
     #url-input {
       -webkit-box-flex: 1;
       -webkit-flex: 1;
       flex: 1;
-      font-size: 16px;
+      font-size: 14px;
     }
 
-    #go-btn, #kbd-btn {
-      font-size: 16px;
-      font-weight: bold;
+    #go-btn, #kbd-btn, #menu-btn {
+      font-size: 12px;
+      white-space: nowrap;
     }
+
+    #menu {
+      display: none;
+      position: absolute;
+      right: 4px;
+      background: #fff;
+      border: 1px solid #999;
+      z-index: 100;
+      -webkit-box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+
+    #menu button {
+      display: block;
+      width: 100%;
+      padding: 10px 18px;
+      font-size: 15px;
+      text-align: left;
+      border: none;
+      border-bottom: 1px solid #ddd;
+      background: transparent;
+    }
+
+    #menu button:last-child { border-bottom: none; }
 
     #stream {
       display: block;
@@ -64,6 +88,14 @@
     >
     <button id="go-btn" type="button">Go</button>
     <button id="kbd-btn" type="button">⌨️</button>
+    <button id="menu-btn" type="button">☰</button>
+  </div>
+
+  <div id="menu">
+    <button id="back-btn" type="button">◀ Back</button>
+    <button id="fwd-btn" type="button">▶ Forward</button>
+    <button id="reload-btn" type="button">⟳ Reload</button>
+    <button id="home-btn" type="button">⌂ Home</button>
   </div>
 
   <img id="stream" src="" alt="">
@@ -72,16 +104,23 @@
 <script>
 (function () {
 
-  var W       = window.screen.width;
-  var input   = document.getElementById("url-input");
-  var goBtn   = document.getElementById("go-btn");
-  var kbdBtn  = document.getElementById("kbd-btn");
-  var stream  = document.getElementById("stream");
-  var toolbar = document.getElementById("toolbar");
-  var kbd     = document.getElementById("kbd");
-  var kbdVal  = "";
+  var W         = window.screen.width;
+  var input     = document.getElementById("url-input");
+  var goBtn     = document.getElementById("go-btn");
+  var kbdBtn    = document.getElementById("kbd-btn");
+  var menuBtn   = document.getElementById("menu-btn");
+  var menu      = document.getElementById("menu");
+  var backBtn   = document.getElementById("back-btn");
+  var fwdBtn    = document.getElementById("fwd-btn");
+  var reloadBtn = document.getElementById("reload-btn");
+  var homeBtn   = document.getElementById("home-btn");
+  var stream    = document.getElementById("stream");
+  var toolbar   = document.getElementById("toolbar");
+  var kbd       = document.getElementById("kbd");
+  var kbdVal    = "";
+  var menuOpen  = false;
 
-  var params  = (function () {
+  var params = (function () {
     var q = {}, s = window.location.search.slice(1).split("&");
     for (var i = 0; i < s.length; i++) {
       var p = s[i].split("=");
@@ -96,16 +135,27 @@
   function layoutStream() {
     var tbRect = toolbar.getBoundingClientRect();
     stream.style.top = tbRect.bottom + "px";
+    menu.style.top = tbRect.bottom + "px";
   }
 
   layoutStream();
   window.onresize = layoutStream;
 
-  function startStream() {
+  function toggleMenu() {
+    menuOpen = !menuOpen;
+    menu.style.display = menuOpen ? "block" : "none";
+  }
+
+  function closeMenu() {
+    menuOpen = false;
+    menu.style.display = "none";
+  }
+
+  function startStream(url) {
     var tbRect  = toolbar.getBoundingClientRect();
     var streamH = window.innerHeight - tbRect.bottom;
     stream.src = "/stream"
-      + "?url=" + encodeURIComponent(currentUrl)
+      + "?url=" + encodeURIComponent(url)
       + "&w="   + W
       + "&h="   + Math.round(streamH);
   }
@@ -113,7 +163,18 @@
   function navigate(url) {
     if (!url) return;
     if (url.indexOf("://") === -1) url = "https://" + url;
-    window.location.href = "/?url=" + encodeURIComponent(url);
+    currentUrl = url;
+    input.value = url;
+    input.blur();
+    closeMenu();
+    startStream(url);
+  }
+
+  function post(endpoint, data) {
+    var xhr = new XMLHttpRequest();
+    xhr.open("POST", endpoint, true);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.send(JSON.stringify(data));
   }
 
   goBtn.onclick = function () { navigate(input.value.trim()); };
@@ -128,12 +189,26 @@
     kbd.focus();
   };
 
-  function post(endpoint, data) {
-    var xhr = new XMLHttpRequest();
-    xhr.open("POST", endpoint, true);
-    xhr.setRequestHeader("Content-Type", "application/json");
-    xhr.send(JSON.stringify(data));
-  }
+  menuBtn.onclick = function () { toggleMenu(); };
+
+  backBtn.onclick = function () {
+    post("/input/back", { url: currentUrl });
+    closeMenu();
+  };
+
+  fwdBtn.onclick = function () {
+    post("/input/forward", { url: currentUrl });
+    closeMenu();
+  };
+
+  reloadBtn.onclick = function () {
+    post("/input/reload", { url: currentUrl });
+    closeMenu();
+  };
+
+  homeBtn.onclick = function () {
+    window.location.href = "/";
+  };
 
   var metaTimer = null;
 
@@ -147,7 +222,9 @@
           var d = eval("(" + xhr.responseText + ")");
           if (d.title) document.title = d.title + " \u2014 Browsnex";
           if (d.driftUrl) {
-            window.location.href = "/?url=" + encodeURIComponent(d.driftUrl);
+            currentUrl = d.driftUrl;
+            input.value = d.driftUrl;
+            startStream(d.driftUrl);
             return;
           }
         } catch (e) {}
@@ -174,6 +251,7 @@
 
   stream.addEventListener("touchstart", function (e) {
     e.preventDefault();
+    if (menuOpen) { closeMenu(); return; }
     var t = e.touches[0];
     touchStartX = t.clientX;
     touchStartY = t.clientY;
@@ -181,6 +259,7 @@
 
   stream.addEventListener("touchmove", function (e) {
     e.preventDefault();
+    if (menuOpen) return;
     var now = Date.now();
     if (now - lastScroll < SCROLL_MS) return;
     lastScroll = now;
@@ -198,6 +277,7 @@
 
   stream.addEventListener("touchend", function (e) {
     e.preventDefault();
+    if (menuOpen) return;
     var t  = e.changedTouches[0];
     var dx = Math.abs(t.clientX - touchStartX);
     var dy = Math.abs(t.clientY - touchStartY);
@@ -225,7 +305,7 @@
     if (code === 40) post("/input/key", { url: currentUrl, key: "ArrowDown" });
   };
 
-  startStream();
+  startStream(currentUrl);
   pollMeta();
 
 }());

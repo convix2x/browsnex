@@ -55,6 +55,19 @@ async function getOrCreateSession(url, width, height) {
   );
 
   const cdp = await page.target().createCDPSession();
+
+  const session = {
+    browser, page, cdp,
+    url, width, height,
+    listeners: new Set(),
+    navigating: false,
+    driftUrl: null,
+    quality: 50,
+    scale: 1.0,
+    lastFrameMs: 0,
+    adjusting: false,
+  };
+
   await cdp.send("Page.startScreencast", {
     format: "jpeg",
     quality: 50,
@@ -63,18 +76,40 @@ async function getOrCreateSession(url, width, height) {
     everyNthFrame: 1,
   });
 
-  const session = {
-    browser, page, cdp,
-    url, width, height,
-    listeners: new Set(),
-    navigating: false,
-    driftUrl: null,
-  };
+  async function setQuality(q, scale) {
+    if (session.adjusting) return;
+    session.adjusting = true;
+    session.quality = q;
+    session.scale = scale;
+    try {
+      await cdp.send("Page.stopScreencast");
+      await cdp.send("Page.startScreencast", {
+        format: "jpeg",
+        quality: q,
+        maxWidth: Math.round(width * scale),
+        maxHeight: Math.round(height * scale),
+        everyNthFrame: 1,
+      });
+    } catch (_) {}
+    session.adjusting = false;
+  }
 
   cdp.on("Page.screencastFrame", async ({ data, sessionId }) => {
+    const start = Date.now();
     const buf = Buffer.from(data, "base64");
     for (const res of session.listeners) writeFrame(res, buf);
     try { await cdp.send("Page.screencastFrameAck", { sessionId }); } catch (_) {}
+    const ms = Date.now() - start;
+    session.lastFrameMs = ms;
+    if (ms > 120) {
+      const q = Math.max(20, session.quality - 10);
+      const s = Math.max(0.4, session.scale - 0.1);
+      if (q !== session.quality || s !== session.scale) setQuality(q, s);
+    } else if (ms < 40) {
+      const q = Math.min(70, session.quality + 5);
+      const s = Math.min(1.0, session.scale + 0.05);
+      if (q !== session.quality || s !== session.scale) setQuality(q, s);
+    }
   });
 
   page.on("framenavigated", (frame) => {
@@ -122,6 +157,28 @@ app.get("/stream", async (req, res) => {
   const cleanup = () => session.listeners.delete(res);
   req.on("close", cleanup);
   req.on("error", cleanup);
+});
+
+app.post("/input/back", (req, res) => {
+  const session = sessions[sessionKey(req.body.url)];
+  if (!session) return res.status(404).end();
+  session.page.goBack().catch(() => {});
+  res.end();
+});
+
+app.post("/input/forward", (req, res) => {
+  const session = sessions[sessionKey(req.body.url)];
+  if (!session) return res.status(404).end();
+  session.page.goForward().catch(() => {});
+  res.end();
+});
+
+app.post("/input/reload", async (req, res) => {
+  const { url } = req.body;
+  const session = sessions[sessionKey(url)];
+  if (!session) return res.status(404).end();
+  session.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+  res.end();
 });
 
 app.post("/input/tap", async (req, res) => {
