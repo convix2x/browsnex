@@ -147,10 +147,16 @@
   </div>
 
   <div id="menu">
-    <button id="back-btn" type="button">◀ Back</button>
-    <button id="fwd-btn" type="button">▶ Forward</button>
-    <button id="reload-btn" type="button">⟳ Reload</button>
-    <button id="home-btn" type="button">⌂ Home</button>
+    <button id="back-btn" type="button">Back</button>
+    <button id="fwd-btn" type="button">Forward</button>
+    <button id="reload-btn" type="button">Reload</button>
+    <button id="home-btn" type="button">Home</button>
+    <select id="quality-select" style="display:block;width:100%;padding:10px 18px;font-size:15px;border:none;border-top:1px solid #ddd;background:transparent;">
+      <option value="auto">Quality: Auto</option>
+      <option value="low">Quality: Low</option>
+      <option value="medium">Quality: Medium</option>
+      <option value="high">Quality: High</option>
+    </select>
   </div>
 
   <img id="stream" src="" alt="">
@@ -171,8 +177,9 @@
   var menu      = document.getElementById("menu");
   var backBtn   = document.getElementById("back-btn");
   var fwdBtn    = document.getElementById("fwd-btn");
-  var reloadBtn = document.getElementById("reload-btn");
-  var homeBtn   = document.getElementById("home-btn");
+  var reloadBtn    = document.getElementById("reload-btn");
+  var homeBtn      = document.getElementById("home-btn");
+  var qualitySelect = document.getElementById("quality-select");
   var stream    = document.getElementById("stream");
   var toolbar   = document.getElementById("toolbar");
   var kbd       = document.getElementById("kbd");
@@ -323,6 +330,10 @@
   fwdBtn.onclick     = function () { post("/input/forward", { cid: cid }); closeMenu(); };
   reloadBtn.onclick  = function () { post("/input/reload",  { cid: cid }); closeMenu(); };
   homeBtn.onclick    = function () { window.location.href = "/"; };
+
+  qualitySelect.onchange = function () {
+    post("/quality", { cid: cid, preset: qualitySelect.value });
+  };
 
   var metaTimer = null;
 

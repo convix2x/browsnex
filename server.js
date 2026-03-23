@@ -77,6 +77,7 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
     scale: 1.0,
     lastFrameMs: 0,
     adjusting: false,
+    manualQuality: false,
   };
 
   await cdp.send("Page.startScreencast", {
@@ -112,6 +113,7 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
     try { await cdp.send("Page.screencastFrameAck", { sessionId }); } catch (_) {}
     const ms = Date.now() - start;
     session.lastFrameMs = ms;
+    if (session.manualQuality) return;
     if (ms > 120) {
       const q = Math.max(20, session.quality - 10);
       const sc = Math.max(0.4, session.scale - 0.1);
@@ -245,6 +247,36 @@ app.post("/input/scrollto", async (req, res) => {
   const session = sessions[req.body.cid];
   if (!session) return res.status(404).end();
   session.page.evaluate(function (y) { window.scrollTo(0, y); }, req.body.y).catch(() => {});
+  res.end();
+});
+
+app.post("/quality", async (req, res) => {
+  const session = sessions[req.body.cid];
+  if (!session) return res.status(404).end();
+  const preset = req.body.preset;
+  const presets = {
+    low:    { quality: 20, scale: 0.4 },
+    medium: { quality: 40, scale: 0.7 },
+    high:   { quality: 70, scale: 1.0 },
+  };
+  if (preset === "auto") {
+    session.manualQuality = false;
+  } else if (presets[preset]) {
+    session.manualQuality = true;
+    const p = presets[preset];
+    session.quality = p.quality;
+    session.scale = p.scale;
+    try {
+      await session.cdp.send("Page.stopScreencast");
+      await session.cdp.send("Page.startScreencast", {
+        format: "jpeg",
+        quality: p.quality,
+        maxWidth: Math.round(session.width * p.scale),
+        maxHeight: Math.round(session.height * p.scale),
+        everyNthFrame: 1,
+      });
+    } catch (_) {}
+  }
   res.end();
 });
 
