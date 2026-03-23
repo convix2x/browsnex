@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <link rel="apple-touch-icon" href="/icon.png">
   <title>Browsnex</title>
   <style>
     * { margin: 0; padding: 0; -webkit-box-sizing: border-box; box-sizing: border-box; }
@@ -31,7 +32,7 @@
       font-size: 16px;
     }
 
-    #go-btn {
+    #go-btn, #kbd-btn {
       font-size: 16px;
       font-weight: bold;
     }
@@ -55,7 +56,6 @@
     <input
       type="url"
       id="url-input"
-      value="https://www.google.com/"
       placeholder="https://..."
       autocorrect="off"
       autocapitalize="none"
@@ -72,9 +72,7 @@
 <script>
 (function () {
 
-  var sid     = "sess-" + Math.random().toString(36).slice(2, 8);
   var W       = window.screen.width;
-  var H       = window.screen.height;
   var input   = document.getElementById("url-input");
   var goBtn   = document.getElementById("go-btn");
   var kbdBtn  = document.getElementById("kbd-btn");
@@ -82,6 +80,18 @@
   var toolbar = document.getElementById("toolbar");
   var kbd     = document.getElementById("kbd");
   var kbdVal  = "";
+
+  var params  = (function () {
+    var q = {}, s = window.location.search.slice(1).split("&");
+    for (var i = 0; i < s.length; i++) {
+      var p = s[i].split("=");
+      if (p[0]) q[decodeURIComponent(p[0])] = decodeURIComponent(p[1] || "");
+    }
+    return q;
+  }());
+
+  var currentUrl = params.url || "https://earth.nullschool.net";
+  input.value = currentUrl;
 
   function layoutStream() {
     var tbRect = toolbar.getBoundingClientRect();
@@ -91,32 +101,20 @@
   layoutStream();
   window.onresize = layoutStream;
 
-  var currentUrl = "";
-
-  function navigate(url) {
-    if (!url) return;
-    if (url.indexOf("://") === -1) url = "https://" + url;
-    currentUrl = url;
-    input.value = url;
-    input.blur();
-
-    layoutStream();
-
+  function startStream() {
     var tbRect  = toolbar.getBoundingClientRect();
     var streamH = window.innerHeight - tbRect.bottom;
-
     stream.src = "/stream"
-      + "?url=" + encodeURIComponent(url)
-      + "&id="  + encodeURIComponent(sid)
+      + "?url=" + encodeURIComponent(currentUrl)
       + "&w="   + W
       + "&h="   + Math.round(streamH);
   }
 
-  kbdBtn.onclick = function () {
-    kbdVal = "";
-    kbd.value = "";
-    kbd.focus();
-  };
+  function navigate(url) {
+    if (!url) return;
+    if (url.indexOf("://") === -1) url = "https://" + url;
+    window.location.href = "/?url=" + encodeURIComponent(url);
+  }
 
   goBtn.onclick = function () { navigate(input.value.trim()); };
 
@@ -124,34 +122,40 @@
     if ((e.keyCode || e.which) === 13) navigate(input.value.trim());
   };
 
-  var metaTimer = null;
-
-  function pollMeta() {
-    if (metaTimer) clearTimeout(metaTimer);
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", "/meta?id=" + encodeURIComponent(sid), true);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState === 4 && xhr.status === 200) {
-        try {
-          var d = eval("(" + xhr.responseText + ")");
-          if (d.title) document.title = d.title + " \u2014 Browsnex";
-          if (d.url && d.url !== currentUrl) {
-            currentUrl = d.url;
-            input.value = d.url;
-          }
-        } catch (e) {}
-        metaTimer = setTimeout(pollMeta, 2000);
-      }
-    };
-    xhr.onerror = function () { metaTimer = setTimeout(pollMeta, 4000); };
-    xhr.send();
-  }
+  kbdBtn.onclick = function () {
+    kbdVal = "";
+    kbd.value = "";
+    kbd.focus();
+  };
 
   function post(endpoint, data) {
     var xhr = new XMLHttpRequest();
     xhr.open("POST", endpoint, true);
     xhr.setRequestHeader("Content-Type", "application/json");
     xhr.send(JSON.stringify(data));
+  }
+
+  var metaTimer = null;
+
+  function pollMeta() {
+    if (metaTimer) clearTimeout(metaTimer);
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", "/meta?url=" + encodeURIComponent(currentUrl), true);
+    xhr.onreadystatechange = function () {
+      if (xhr.readyState === 4 && xhr.status === 200) {
+        try {
+          var d = eval("(" + xhr.responseText + ")");
+          if (d.title) document.title = d.title + " \u2014 Browsnex";
+          if (d.driftUrl) {
+            window.location.href = "/?url=" + encodeURIComponent(d.driftUrl);
+            return;
+          }
+        } catch (e) {}
+        metaTimer = setTimeout(pollMeta, 1500);
+      }
+    };
+    xhr.onerror = function () { metaTimer = setTimeout(pollMeta, 3000); };
+    xhr.send();
   }
 
   var touchStartX = 0;
@@ -180,17 +184,14 @@
     var now = Date.now();
     if (now - lastScroll < SCROLL_MS) return;
     lastScroll = now;
-
     var t  = e.touches[0];
     var r  = stream.getBoundingClientRect();
     var sc = W / r.width;
-
     post("/input/scroll", {
-      id: sid,
+      url: currentUrl,
       dx: (touchStartX - t.clientX) * sc,
       dy: (touchStartY - t.clientY) * sc
     });
-
     touchStartX = t.clientX;
     touchStartY = t.clientY;
   }, false);
@@ -200,33 +201,31 @@
     var t  = e.changedTouches[0];
     var dx = Math.abs(t.clientX - touchStartX);
     var dy = Math.abs(t.clientY - touchStartY);
-
     if (dx < 10 && dy < 10) {
       var c = streamCoords(t.clientX, t.clientY);
-      post("/input/tap", { id: sid, x: c.x, y: c.y });
+      post("/input/tap", { url: currentUrl, x: c.x, y: c.y });
     }
   }, false);
 
   kbd.oninput = function () {
     var next = kbd.value;
     if (next.length > kbdVal.length) {
-      var added = next.slice(kbdVal.length);
-      post("/input/type", { id: sid, text: added });
+      post("/input/type", { url: currentUrl, text: next.slice(kbdVal.length) });
     }
     kbdVal = next;
   };
 
   kbd.onkeydown = function (e) {
     var code = e.keyCode || e.which;
-    if (code === 8)  post("/input/key", { id: sid, key: "Backspace" });
-    if (code === 13) post("/input/key", { id: sid, key: "Enter" });
-    if (code === 37) post("/input/key", { id: sid, key: "ArrowLeft" });
-    if (code === 38) post("/input/key", { id: sid, key: "ArrowUp" });
-    if (code === 39) post("/input/key", { id: sid, key: "ArrowRight" });
-    if (code === 40) post("/input/key", { id: sid, key: "ArrowDown" });
+    if (code === 8)  post("/input/key", { url: currentUrl, key: "Backspace" });
+    if (code === 13) post("/input/key", { url: currentUrl, key: "Enter" });
+    if (code === 37) post("/input/key", { url: currentUrl, key: "ArrowLeft" });
+    if (code === 38) post("/input/key", { url: currentUrl, key: "ArrowUp" });
+    if (code === 39) post("/input/key", { url: currentUrl, key: "ArrowRight" });
+    if (code === 40) post("/input/key", { url: currentUrl, key: "ArrowDown" });
   };
 
-  navigate(input.value.trim());
+  startStream();
   pollMeta();
 
 }());
