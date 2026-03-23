@@ -21,20 +21,59 @@
       -webkit-box-align: center;
       -webkit-align-items: center;
       align-items: center;
-      padding: 2px 4px;
-      gap: 3px;
+      padding: 5px 6px;
+      gap: 4px;
+      background: -webkit-linear-gradient(top, #587397, #384963);
+      background: linear-gradient(to bottom, #587397, #384963);
     }
 
     #url-input {
       -webkit-box-flex: 1;
       -webkit-flex: 1;
       flex: 1;
+      min-width: 0;
       font-size: 14px;
+      height: 30px;
+      border-radius: 8px;
+      padding: 0 8px;
     }
 
-    #go-btn, #kbd-btn, #menu-btn {
+    #go-btn {
+      background-image: url('/button.png');
+      background-size: 100% 100%;
+      background-repeat: no-repeat;
+      background-color: transparent;
+      border: none;
+      height: 30px;
+      width: 56px;
       font-size: 12px;
+      font-weight: bold;
+      color: #fff;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+      padding: 0;
+      line-height: 30px;
+      text-align: center;
+      -webkit-flex-shrink: 0;
+      flex-shrink: 0;
+    }
+
+    #kbd-btn, #menu-btn {
+      background-image: url('/buttoncircle.png');
+      background-size: 100% 100%;
+      background-repeat: no-repeat;
+      background-color: transparent;
+      border: none;
+      width: 30px;
+      height: 30px;
+      font-size: 15px;
+      color: #fff;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+      padding: 0;
+      line-height: 30px;
+      text-align: center;
       white-space: nowrap;
+      -webkit-flex-shrink: 0;
+      flex-shrink: 0;
     }
 
     #menu {
