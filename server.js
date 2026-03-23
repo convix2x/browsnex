@@ -24,10 +24,7 @@ function writeFrame(res, buf) {
 
 async function getOrCreateSession(url, width, height) {
   const key = sessionKey(url);
-
-  if (sessions[key]) {
-    return sessions[key];
-  }
+  if (sessions[key]) return sessions[key];
 
   const browser = await puppeteer.launch({
     headless: "new",
@@ -58,7 +55,6 @@ async function getOrCreateSession(url, width, height) {
   );
 
   const cdp = await page.target().createCDPSession();
-
   await cdp.send("Page.startScreencast", {
     format: "jpeg",
     quality: 50,
