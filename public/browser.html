@@ -98,7 +98,22 @@
       background: transparent;
     }
 
-    #menu button:last-child { border-bottom: none; }
+    #scrollbar-track {
+      display: none;
+      position: fixed;
+      right: 0;
+      top: 0;
+      width: 16px;
+      overflow-y: scroll;
+      overflow-x: hidden;
+      bottom: 0;
+      z-index: 50;
+    }
+
+    #scrollbar-thumb {
+      width: 1px;
+      min-height: 2000px;
+    }
 
     #stream {
       display: block;
@@ -110,6 +125,7 @@
       -webkit-user-select: none;
       user-select: none;
       -webkit-touch-callout: none;
+      cursor: default;
     }
   </style>
 </head>
@@ -138,12 +154,16 @@
   </div>
 
   <img id="stream" src="" alt="">
+  <div id="scrollbar-track"><div id="scrollbar-thumb"></div></div>
   <input id="kbd" type="text" style="position:fixed;left:0;top:0;width:100%;height:100%;opacity:0;z-index:-1;" autocorrect="off" autocapitalize="none" autocomplete="off" spellcheck="false">
 
 <script>
 (function () {
 
-  var W         = window.screen.width;
+  var isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+  var W       = isTouch ? window.screen.width : window.innerWidth;
+  var H       = isTouch ? window.screen.height : window.innerHeight;
+
   var input     = document.getElementById("url-input");
   var goBtn     = document.getElementById("go-btn");
   var kbdBtn    = document.getElementById("kbd-btn");
@@ -156,8 +176,35 @@
   var stream    = document.getElementById("stream");
   var toolbar   = document.getElementById("toolbar");
   var kbd       = document.getElementById("kbd");
+  var sbTrack   = document.getElementById("scrollbar-track");
+  var sbThumb   = document.getElementById("scrollbar-thumb");
   var kbdVal    = "";
   var menuOpen  = false;
+  var sbScrolling = false;
+  var sbTimer     = null;
+  var sbOnScroll  = null;
+
+  function makeXHR() {
+    if (window.XMLHttpRequest) return new XMLHttpRequest();
+    if (window.ActiveXObject) return new ActiveXObject("Microsoft.XMLHTTP");
+    return null;
+  }
+
+  function clientUA() {
+    var p = navigator.platform || "";
+    var ua = navigator.userAgent || "";
+    if (isTouch) return "mobile";
+    if (p.indexOf("Win") !== -1) {
+      if (ua.indexOf("Windows NT 10") !== -1) return "Windows NT 10.0";
+      if (ua.indexOf("Windows NT 6.1") !== -1) return "Windows NT 6.1";
+      if (ua.indexOf("Windows NT 6") !== -1)   return "Windows NT 6.0";
+      if (ua.indexOf("Windows NT 5.1") !== -1) return "Windows NT 5.1";
+      return "Windows 98";
+    }
+    if (p.indexOf("Mac") !== -1) return "Macintosh";
+    if (p.indexOf("Linux") !== -1) return "X11; Linux x86_64";
+    return "Windows 98";
+  }
 
   var cid = (function () {
     var stored = window.sessionStorage && sessionStorage.getItem("browsnex_cid");
@@ -179,14 +226,42 @@
   var currentUrl = params.url || "https://earth.nullschool.net";
   input.value = currentUrl;
 
+  if (!isTouch) {
+    kbdBtn.style.display = "none";
+    sbTrack.style.display = "block";
+
+    var lastSbTop = 0;
+
+    sbOnScroll = function () {
+      if (sbTimer) clearTimeout(sbTimer);
+      sbScrolling = true;
+      var delta = sbTrack.scrollTop - lastSbTop;
+      lastSbTop = sbTrack.scrollTop;
+      if (delta !== 0) {
+        post("/input/scroll", { cid: cid, dx: 0, dy: delta * 4 });
+      }
+      sbTimer = setTimeout(function () { sbScrolling = false; }, 500);
+    };
+
+    sbTrack.onscroll = sbOnScroll;
+  }
+
   function layoutStream() {
     var tbRect = toolbar.getBoundingClientRect();
-    stream.style.top = tbRect.bottom + "px";
-    menu.style.top = tbRect.bottom + "px";
+    var top = tbRect.bottom;
+    stream.style.top = top + "px";
+    menu.style.top = top + "px";
+    if (!isTouch) {
+      sbTrack.style.top = top + "px";
+      sbTrack.style.height = (window.innerHeight - top) + "px";
+    }
   }
 
   layoutStream();
-  window.onresize = layoutStream;
+  window.onresize = function () {
+    W = window.innerWidth;
+    layoutStream();
+  };
 
   function toggleMenu() {
     menuOpen = !menuOpen;
@@ -198,14 +273,24 @@
     menu.style.display = "none";
   }
 
+  function post(endpoint, data) {
+    var xhr = makeXHR();
+    if (!xhr) return;
+    xhr.open("POST", endpoint, true);
+    xhr.setRequestHeader("Content-Type", "application/json");
+    xhr.send(JSON.stringify(data));
+  }
+
   function startStream(url) {
     var tbRect  = toolbar.getBoundingClientRect();
     var streamH = window.innerHeight - tbRect.bottom;
     stream.src = "/stream"
       + "?url=" + encodeURIComponent(url)
       + "&cid=" + cid
+      + "&ua="  + encodeURIComponent(clientUA())
       + "&w="   + W
       + "&h="   + Math.round(streamH);
+    stream.onload = layoutStream;
   }
 
   function navigate(url) {
@@ -215,14 +300,10 @@
     input.value = url;
     input.blur();
     closeMenu();
+    if (window.history && window.history.pushState) {
+      window.history.pushState(null, "", "/?url=" + encodeURIComponent(url));
+    }
     startStream(url);
-  }
-
-  function post(endpoint, data) {
-    var xhr = new XMLHttpRequest();
-    xhr.open("POST", endpoint, true);
-    xhr.setRequestHeader("Content-Type", "application/json");
-    xhr.send(JSON.stringify(data));
   }
 
   goBtn.onclick = function () { navigate(input.value.trim()); };
@@ -238,49 +319,64 @@
   };
 
   menuBtn.onclick = function () { toggleMenu(); };
-
-  backBtn.onclick = function () {
-    post("/input/back", { cid: cid });
-    closeMenu();
-  };
-
-  fwdBtn.onclick = function () {
-    post("/input/forward", { cid: cid });
-    closeMenu();
-  };
-
-  reloadBtn.onclick = function () {
-    post("/input/reload", { cid: cid });
-    closeMenu();
-  };
-
-  homeBtn.onclick = function () {
-    window.location.href = "/";
-  };
+  backBtn.onclick    = function () { post("/input/back",    { cid: cid }); closeMenu(); };
+  fwdBtn.onclick     = function () { post("/input/forward", { cid: cid }); closeMenu(); };
+  reloadBtn.onclick  = function () { post("/input/reload",  { cid: cid }); closeMenu(); };
+  homeBtn.onclick    = function () { window.location.href = "/"; };
 
   var metaTimer = null;
 
-  function pollMeta() {
+  function pollMeta(fast) {
     if (metaTimer) clearTimeout(metaTimer);
-    var xhr = new XMLHttpRequest();
-    xhr.open("GET", "/meta?cid=" + cid, true);
-    xhr.onreadystatechange = function () {
-      if (xhr.readyState === 4 && xhr.status === 200) {
+    var metaXhr = makeXHR();
+    if (!metaXhr) return;
+    metaXhr.open("GET", "/meta?cid=" + cid, true);
+    metaXhr.onreadystatechange = function () {
+      if (metaXhr.readyState === 4 && metaXhr.status === 200) {
         try {
-          var d = eval("(" + xhr.responseText + ")");
+          var d = eval("(" + metaXhr.responseText + ")");
           if (d.title) document.title = d.title + " \u2014 Browsnex";
           if (d.driftUrl) {
             currentUrl = d.driftUrl;
             input.value = d.driftUrl;
+            if (window.history && window.history.pushState) {
+              window.history.pushState(null, "", "/?url=" + encodeURIComponent(d.driftUrl));
+            }
             startStream(d.driftUrl);
+            metaTimer = setTimeout(function () { pollMeta(false); }, 1500);
             return;
           }
         } catch (e) {}
-        metaTimer = setTimeout(pollMeta, 1500);
+        if (!isTouch) {
+          var siXhr = makeXHR();
+          if (siXhr) {
+            siXhr.open("GET", "/scrollinfo?cid=" + cid, true);
+            siXhr.onreadystatechange = function () {
+              if (siXhr.readyState === 4 && siXhr.status === 200) {
+                try {
+                  var info = eval("(" + siXhr.responseText + ")");
+                  sbThumb.style.height = info.scrollHeight + "px";
+                  if (!sbScrolling) {
+                    var total = info.scrollHeight - info.innerHeight;
+                    if (total > 0) {
+                      var pct = info.scrollY / total;
+                      var trackScrollable = sbTrack.scrollHeight - sbTrack.clientHeight;
+                      sbTrack.onscroll = null;
+                      sbTrack.scrollTop = pct * trackScrollable;
+                      sbTrack.onscroll = sbOnScroll;
+                    }
+                  }
+                } catch (_) {}
+              }
+            };
+            siXhr.send();
+          }
+        }
+        metaTimer = setTimeout(function () { pollMeta(false); }, fast ? 150 : 1500);
       }
     };
-    xhr.onerror = function () { metaTimer = setTimeout(pollMeta, 3000); };
-    xhr.send();
+    metaXhr.onerror = function () { metaTimer = setTimeout(function () { pollMeta(false); }, 3000); };
+    metaXhr.send();
   }
 
   var touchStartX = 0;
@@ -297,64 +393,119 @@
     };
   }
 
-  stream.addEventListener("touchstart", function (e) {
-    e.preventDefault();
-    if (menuOpen) { closeMenu(); return; }
-    var t = e.touches[0];
-    touchStartX = t.clientX;
-    touchStartY = t.clientY;
-  }, false);
+  if (isTouch) {
+    stream.addEventListener("touchstart", function (e) {
+      e.preventDefault();
+      if (menuOpen) { closeMenu(); return; }
+      var t = e.touches[0];
+      touchStartX = t.clientX;
+      touchStartY = t.clientY;
+    }, false);
 
-  stream.addEventListener("touchmove", function (e) {
-    e.preventDefault();
-    if (menuOpen) return;
-    var now = Date.now();
-    if (now - lastScroll < SCROLL_MS) return;
-    lastScroll = now;
-    var t  = e.touches[0];
-    var r  = stream.getBoundingClientRect();
-    var sc = W / r.width;
-    post("/input/scroll", {
-      cid: cid,
-      dx: (touchStartX - t.clientX) * sc,
-      dy: (touchStartY - t.clientY) * sc
-    });
-    touchStartX = t.clientX;
-    touchStartY = t.clientY;
-  }, false);
+    stream.addEventListener("touchmove", function (e) {
+      e.preventDefault();
+      if (menuOpen) return;
+      var now = Date.now();
+      if (now - lastScroll < SCROLL_MS) return;
+      lastScroll = now;
+      var t  = e.touches[0];
+      var r  = stream.getBoundingClientRect();
+      var sc = W / r.width;
+      post("/input/scroll", {
+        cid: cid,
+        dx: (touchStartX - t.clientX) * sc,
+        dy: (touchStartY - t.clientY) * sc
+      });
+      touchStartX = t.clientX;
+      touchStartY = t.clientY;
+    }, false);
 
-  stream.addEventListener("touchend", function (e) {
-    e.preventDefault();
-    if (menuOpen) return;
-    var t  = e.changedTouches[0];
-    var dx = Math.abs(t.clientX - touchStartX);
-    var dy = Math.abs(t.clientY - touchStartY);
-    if (dx < 10 && dy < 10) {
-      var c = streamCoords(t.clientX, t.clientY);
+    stream.addEventListener("touchend", function (e) {
+      e.preventDefault();
+      if (menuOpen) return;
+      var t  = e.changedTouches[0];
+      var dx = Math.abs(t.clientX - touchStartX);
+      var dy = Math.abs(t.clientY - touchStartY);
+      if (dx < 10 && dy < 10) {
+        var c = streamCoords(t.clientX, t.clientY);
+        post("/input/tap", { cid: cid, x: c.x, y: c.y });
+        pollMeta(true);
+      }
+    }, false);
+
+    kbd.oninput = function () {
+      var next = kbd.value;
+      if (next.length > kbdVal.length) {
+        post("/input/type", { cid: cid, text: next.slice(kbdVal.length) });
+      }
+      kbdVal = next;
+    };
+
+    kbd.onkeydown = function (e) {
+      var code = e.keyCode || e.which;
+      if (code === 8)  post("/input/key", { cid: cid, key: "Backspace" });
+      if (code === 13) post("/input/key", { cid: cid, key: "Enter" });
+      if (code === 37) post("/input/key", { cid: cid, key: "ArrowLeft" });
+      if (code === 38) post("/input/key", { cid: cid, key: "ArrowUp" });
+      if (code === 39) post("/input/key", { cid: cid, key: "ArrowRight" });
+      if (code === 40) post("/input/key", { cid: cid, key: "ArrowDown" });
+    };
+
+  } else {
+    stream.onclick = function (e) {
+      if (menuOpen) { closeMenu(); return; }
+      var c = streamCoords(e.clientX, e.clientY);
       post("/input/tap", { cid: cid, x: c.x, y: c.y });
-    }
-  }, false);
+      kbd.focus();
+      pollMeta(true);
+    };
 
-  kbd.oninput = function () {
-    var next = kbd.value;
-    if (next.length > kbdVal.length) {
-      post("/input/type", { cid: cid, text: next.slice(kbdVal.length) });
-    }
-    kbdVal = next;
-  };
+    var lastDelta = 0;
 
-  kbd.onkeydown = function (e) {
-    var code = e.keyCode || e.which;
-    if (code === 8)  post("/input/key", { cid: cid, key: "Backspace" });
-    if (code === 13) post("/input/key", { cid: cid, key: "Enter" });
-    if (code === 37) post("/input/key", { cid: cid, key: "ArrowLeft" });
-    if (code === 38) post("/input/key", { cid: cid, key: "ArrowUp" });
-    if (code === 39) post("/input/key", { cid: cid, key: "ArrowRight" });
-    if (code === 40) post("/input/key", { cid: cid, key: "ArrowDown" });
-  };
+    function doScroll(dy) {
+      if ((lastDelta > 0 && dy < 0) || (lastDelta < 0 && dy > 0)) {
+        lastDelta = 0;
+        return;
+      }
+      lastDelta = dy;
+      post("/input/scroll", { cid: cid, dx: 0, dy: dy });
+    }
+
+    stream.onmousewheel = function (e) {
+      if (menuOpen) return;
+      var delta = e.wheelDelta ? -e.wheelDelta : (e.detail * 40);
+      doScroll(delta * 0.8);
+      if (e.preventDefault) e.preventDefault();
+      return false;
+    };
+
+    stream.addEventListener("DOMMouseScroll", function (e) {
+      if (menuOpen) return;
+      doScroll(e.detail * 32);
+      if (e.preventDefault) e.preventDefault();
+    }, false);
+
+    document.onkeydown = function (e) {
+      if (document.activeElement === input) return;
+      var code = e.keyCode || e.which;
+      if (code === 8)  { post("/input/key", { cid: cid, key: "Backspace" }); if (e.preventDefault) e.preventDefault(); }
+      if (code === 13) post("/input/key", { cid: cid, key: "Enter" });
+      if (code === 37) post("/input/key", { cid: cid, key: "ArrowLeft" });
+      if (code === 38) post("/input/key", { cid: cid, key: "ArrowUp" });
+      if (code === 39) post("/input/key", { cid: cid, key: "ArrowRight" });
+      if (code === 40) post("/input/key", { cid: cid, key: "ArrowDown" });
+    };
+
+    document.onkeypress = function (e) {
+      if (document.activeElement === input) return;
+      var code = e.keyCode || e.which || e.charCode;
+      if (code < 32) return;
+      post("/input/type", { cid: cid, text: String.fromCharCode(code) });
+    };
+  }
 
   startStream(currentUrl);
-  pollMeta();
+  pollMeta(false);
 
 }());
 </script>

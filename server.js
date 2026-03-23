@@ -18,7 +18,14 @@ function writeFrame(res, buf) {
   } catch (_) {}
 }
 
-async function getOrCreateSession(cid, url, width, height) {
+function buildUA(clientUA) {
+  if (!clientUA || clientUA === "mobile") {
+    return "Mozilla/5.0 (Linux; Android 10; Pixel 4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36";
+  }
+  return "Mozilla/5.0 (" + clientUA + ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
+}
+
+async function getOrCreateSession(cid, url, width, height, clientUA) {
   if (sessions[cid]) {
     const s = sessions[cid];
     if (s.url !== url) {
@@ -56,11 +63,7 @@ async function getOrCreateSession(cid, url, width, height) {
     window.chrome = { runtime: {} };
   });
   await page.setViewport({ width, height, deviceScaleFactor: 1 });
-  await page.setUserAgent(
-    "Mozilla/5.0 (Linux; Android 10; Pixel 4) " +
-    "AppleWebKit/537.36 (KHTML, like Gecko) " +
-    "Chrome/122.0.0.0 Mobile Safari/537.36"
-  );
+  await page.setUserAgent(buildUA(clientUA));
 
   const cdp = await page.target().createCDPSession();
 
@@ -155,10 +158,11 @@ app.get("/stream", async (req, res) => {
   const cid    = req.query.cid || "default";
   const width  = parseInt(req.query.w) || 375;
   const height = parseInt(req.query.h) || 667;
+  const ua     = req.query.ua || "mobile";
 
   let session;
   try {
-    session = await getOrCreateSession(cid, url, width, height);
+    session = await getOrCreateSession(cid, url, width, height, ua);
   } catch (err) {
     res.status(500).send("Failed: " + err.message);
     return;
@@ -173,7 +177,10 @@ app.get("/stream", async (req, res) => {
 
   session.listeners.add(res);
 
-  const cleanup = () => {
+  var closed = false;
+  var cleanup = function () {
+    if (closed) return;
+    closed = true;
     session.listeners.delete(res);
     if (session.listeners.size === 0) {
       destroySession(cid);
@@ -216,6 +223,28 @@ app.post("/input/key", (req, res) => {
   const session = sessions[cid];
   if (!session) return res.status(404).end();
   session.page.keyboard.press(key).catch(() => {});
+  res.end();
+});
+
+app.get("/scrollinfo", async (req, res) => {
+  const session = sessions[req.query.cid];
+  if (!session) return res.json({ scrollY: 0, scrollHeight: 1000, innerHeight: 667 });
+  try {
+    const info = await session.page.evaluate(() => ({
+      scrollY: window.scrollY,
+      scrollHeight: document.body.scrollHeight,
+      innerHeight: window.innerHeight
+    }));
+    res.json(info);
+  } catch (_) {
+    res.json({ scrollY: 0, scrollHeight: 1000, innerHeight: 667 });
+  }
+});
+
+app.post("/input/scrollto", async (req, res) => {
+  const session = sessions[req.body.cid];
+  if (!session) return res.status(404).end();
+  session.page.evaluate(function (y) { window.scrollTo(0, y); }, req.body.y).catch(() => {});
   res.end();
 });
 
