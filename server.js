@@ -7,7 +7,14 @@ const net = require("net");
 
 const app = express();
 
-const config = JSON.parse(fs.readFileSync(path.join(__dirname, "config.jsonc"), "utf8"));
+function parseJSONC(str) {
+  return JSON.parse(str
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "")
+  );
+}
+
+const config = parseJSONC(fs.readFileSync(path.join(__dirname, "config.jsonc"), "utf8"));
 const PORT         = config.port         || 3000;
 const MAX_SESSIONS = config.maxSessions  || 10;
 const SESSION_TTL  = config.sessionTTL   || 300000;
@@ -16,8 +23,9 @@ const DOMAINS      = (config.domains     || []).map(d => d.toLowerCase());
 const MEM_LIMIT_MB = config.memLimitMb   || 512;
 const RATE_WINDOW  = config.rateWindow   || 60000;
 const RATE_MAX     = config.rateMax      || 5;
+const MAX_BODY_KB  = config.maxBodyKb    || 64;
 
-app.use(express.json());
+app.use(express.json({ limit: MAX_BODY_KB + "kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 const sessions = {};
@@ -44,6 +52,42 @@ setInterval(() => {
   }
 }, RATE_WINDOW);
 
+function sanitizeCid(cid) {
+  if (typeof cid !== "string") return null;
+  if (!/^[a-zA-Z0-9_-]{1,32}$/.test(cid)) return null;
+  return cid;
+}
+
+function sanitizeUrl(url) {
+  if (typeof url !== "string" || url.length > 2048) return null;
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return url;
+  } catch (_) { return null; }
+}
+
+function sanitizeInt(val, min, max, def) {
+  const n = parseInt(val);
+  if (isNaN(n)) return def;
+  return Math.min(max, Math.max(min, n));
+}
+
+function sanitizeText(text, maxLen) {
+  if (typeof text !== "string") return null;
+  return text.slice(0, maxLen);
+}
+
+const ALLOWED_KEYS = new Set([
+  "Backspace","Enter","ArrowLeft","ArrowRight","ArrowUp","ArrowDown",
+  "Tab","Escape","Delete","Home","End","PageUp","PageDown",
+]);
+
+function sanitizeKey(key) {
+  if (typeof key !== "string") return null;
+  return ALLOWED_KEYS.has(key) ? key : null;
+}
+
 function isPrivateIP(ip) {
   if (ip === "127.0.0.1" || ip === "::1" || ip === "localhost") return true;
   const privateRanges = [
@@ -61,9 +105,7 @@ function isPrivateIP(ip) {
 async function checkSSRF(url) {
   let hostname;
   try { hostname = new URL(url).hostname; } catch (_) { return false; }
-  if (net.isIP(hostname)) {
-    return !isPrivateIP(hostname);
-  }
+  if (net.isIP(hostname)) return !isPrivateIP(hostname);
   return new Promise((resolve) => {
     dns.lookup(hostname, (err, address) => {
       if (err || !address) return resolve(false);
@@ -261,9 +303,7 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
     destroySession(cid);
     if (listeners.length > 0) {
       getOrCreateSession(cid, session.url, width, height, clientUA)
-        .then(s => {
-          for (const res of listeners) s.listeners.add(res);
-        })
+        .then(s => { for (const res of listeners) s.listeners.add(res); })
         .catch(e => log(`[crash] recovery failed: ${e.message}`));
     }
   });
@@ -274,9 +314,7 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
       const jsHeap = metrics.metrics.find(m => m.name === "JSHeapUsedSize");
       if (jsHeap && jsHeap.value > MEM_LIMIT_MB * 1024 * 1024) {
         log(`[mem] session ${cid} exceeded ${MEM_LIMIT_MB}MB, closing`);
-        for (const res of session.listeners) {
-          try { res.end(); } catch (_) {}
-        }
+        for (const res of session.listeners) { try { res.end(); } catch (_) {} }
         destroySession(cid);
       }
     } catch (_) {}
@@ -319,22 +357,21 @@ async function streamResponse(req, res, session, cid) {
 }
 
 app.get("/stream", async (req, res) => {
-  const ip     = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-  const url    = req.query.url || "https://earth.nullschool.net";
-  const cid    = req.query.cid || "default";
-  const width  = parseInt(req.query.w) || 375;
-  const height = parseInt(req.query.h) || 667;
-  const ua     = req.query.ua || "mobile";
+  const ip  = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
+  const url = sanitizeUrl(req.query.url || "https://earth.nullschool.net");
+  const cid = sanitizeCid(req.query.cid || "default");
+  const width  = sanitizeInt(req.query.w, 100, 3840, 375);
+  const height = sanitizeInt(req.query.h, 100, 2160, 667);
+  const ua  = sanitizeText(req.query.ua, 200) || "mobile";
 
-  if (!rateLimit(ip)) {
-    res.status(429).send("Too many sessions — try again later");
-    return;
-  }
+  if (!url || !cid) return res.status(400).send("Invalid parameters");
+
+  if (!rateLimit(ip)) return res.status(429).send("Too many sessions — try again later");
 
   const ssrfOk = await checkSSRF(url);
   if (!ssrfOk) {
     let session;
-    try { session = await getOrCreateSession(cid, "about:blank", width, height, ua); } catch (e) { res.status(503).send(e.message); return; }
+    try { session = await getOrCreateSession(cid, "about:blank", width, height, ua); } catch (e) { return res.status(503).send(e.message); }
     const html = loadInternalPage("blocked.html", { hostname: "private/internal address" });
     await session.page.goto("data:text/html," + encodeURIComponent(html)).catch(() => {});
     await streamResponse(req, res, session, cid);
@@ -343,7 +380,7 @@ app.get("/stream", async (req, res) => {
 
   if (!checkDomain(url)) {
     let session;
-    try { session = await getOrCreateSession(cid, "about:blank", width, height, ua); } catch (e) { res.status(503).send(e.message); return; }
+    try { session = await getOrCreateSession(cid, "about:blank", width, height, ua); } catch (e) { return res.status(503).send(e.message); }
     const html = loadInternalPage("blocked.html", { hostname: new URL(url).hostname });
     await session.page.goto("data:text/html," + encodeURIComponent(html)).catch(() => {});
     await streamResponse(req, res, session, cid);
@@ -354,8 +391,7 @@ app.get("/stream", async (req, res) => {
   try {
     session = await getOrCreateSession(cid, url, width, height, ua);
   } catch (err) {
-    res.status(503).send(err.message);
-    return;
+    return res.status(503).send(err.message);
   }
 
   await streamResponse(req, res, session, cid);
@@ -368,7 +404,10 @@ function getSession(cid) {
 }
 
 app.post("/input/tap", async (req, res) => {
-  const { cid, x, y } = req.body;
+  const cid = sanitizeCid(req.body.cid);
+  const x   = sanitizeInt(req.body.x, 0, 3840, 0);
+  const y   = sanitizeInt(req.body.y, 0, 2160, 0);
+  if (!cid) return res.status(400).end();
   const session = getSession(cid);
   if (!session) return res.status(404).end();
   await session.page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); }).catch(() => {});
@@ -377,7 +416,10 @@ app.post("/input/tap", async (req, res) => {
 });
 
 app.post("/input/scroll", (req, res) => {
-  const { cid, dx, dy } = req.body;
+  const cid = sanitizeCid(req.body.cid);
+  const dx  = sanitizeInt(req.body.dx, -5000, 5000, 0);
+  const dy  = sanitizeInt(req.body.dy, -5000, 5000, 0);
+  if (!cid) return res.status(400).end();
   const session = getSession(cid);
   if (!session) return res.status(404).end();
   session.page.mouse.wheel({ deltaX: dx, deltaY: dy }).catch(() => {});
@@ -385,7 +427,9 @@ app.post("/input/scroll", (req, res) => {
 });
 
 app.post("/input/type", (req, res) => {
-  const { cid, text } = req.body;
+  const cid  = sanitizeCid(req.body.cid);
+  const text = sanitizeText(req.body.text, 512);
+  if (!cid || text === null) return res.status(400).end();
   const session = getSession(cid);
   if (!session) return res.status(404).end();
   session.page.keyboard.type(text, { delay: 0 }).catch(() => {});
@@ -393,7 +437,9 @@ app.post("/input/type", (req, res) => {
 });
 
 app.post("/input/key", (req, res) => {
-  const { cid, key } = req.body;
+  const cid = sanitizeCid(req.body.cid);
+  const key = sanitizeKey(req.body.key);
+  if (!cid || !key) return res.status(400).end();
   const session = getSession(cid);
   if (!session) return res.status(404).end();
   session.page.keyboard.press(key).catch(() => {});
@@ -401,7 +447,9 @@ app.post("/input/key", (req, res) => {
 });
 
 app.get("/scrollinfo", async (req, res) => {
-  const session = getSession(req.query.cid);
+  const cid = sanitizeCid(req.query.cid);
+  if (!cid) return res.json({ scrollY: 0, scrollHeight: 1000, innerHeight: 667 });
+  const session = getSession(cid);
   if (!session) return res.json({ scrollY: 0, scrollHeight: 1000, innerHeight: 667 });
   try {
     const info = await session.page.evaluate(() => ({
@@ -416,16 +464,21 @@ app.get("/scrollinfo", async (req, res) => {
 });
 
 app.post("/input/scrollto", (req, res) => {
-  const session = getSession(req.body.cid);
+  const cid = sanitizeCid(req.body.cid);
+  const y   = sanitizeInt(req.body.y, 0, 999999, 0);
+  if (!cid) return res.status(400).end();
+  const session = getSession(cid);
   if (!session) return res.status(404).end();
-  session.page.evaluate((y) => window.scrollTo(0, y), req.body.y).catch(() => {});
+  session.page.evaluate((y) => window.scrollTo(0, y), y).catch(() => {});
   res.end();
 });
 
 app.post("/quality", async (req, res) => {
-  const session = getSession(req.body.cid);
+  const cid    = sanitizeCid(req.body.cid);
+  const preset = sanitizeText(req.body.preset, 16);
+  if (!cid || !preset) return res.status(400).end();
+  const session = getSession(cid);
   if (!session) return res.status(404).end();
-  const preset = req.body.preset;
   const presets = {
     low:    { quality: 20, scale: 0.4 },
     medium: { quality: 40, scale: 0.7 },
@@ -452,12 +505,14 @@ app.post("/quality", async (req, res) => {
   res.end();
 });
 
-app.post("/input/back",    (req, res) => { const s = getSession(req.body.cid); if (!s) return res.status(404).end(); s.page.goBack().catch(() => {}); res.end(); });
-app.post("/input/forward", (req, res) => { const s = getSession(req.body.cid); if (!s) return res.status(404).end(); s.page.goForward().catch(() => {}); res.end(); });
-app.post("/input/reload",  (req, res) => { const s = getSession(req.body.cid); if (!s) return res.status(404).end(); s.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {}); res.end(); });
+app.post("/input/back",    (req, res) => { const cid = sanitizeCid(req.body.cid); if (!cid) return res.status(400).end(); const s = getSession(cid); if (!s) return res.status(404).end(); s.page.goBack().catch(() => {}); res.end(); });
+app.post("/input/forward", (req, res) => { const cid = sanitizeCid(req.body.cid); if (!cid) return res.status(400).end(); const s = getSession(cid); if (!s) return res.status(404).end(); s.page.goForward().catch(() => {}); res.end(); });
+app.post("/input/reload",  (req, res) => { const cid = sanitizeCid(req.body.cid); if (!cid) return res.status(400).end(); const s = getSession(cid); if (!s) return res.status(404).end(); s.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {}); res.end(); });
 
 app.get("/meta", async (req, res) => {
-  const session = getSession(req.query.cid);
+  const cid = sanitizeCid(req.query.cid);
+  if (!cid) return res.json({ title: "Browsnex", driftUrl: null });
+  const session = getSession(cid);
   if (!session) return res.json({ title: "Browsnex", driftUrl: null });
   try {
     const driftUrl = session.driftUrl;
@@ -476,7 +531,19 @@ app.get("/", (req, res) => {
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  log(`  Browsnex running → http://localhost:${PORT}`);
-  log(`  Max sessions: ${MAX_SESSIONS}, TTL: ${SESSION_TTL/1000}s, Security mode: ${DOMAIN_MODE}, Mem limit: ${MEM_LIMIT_MB}MB`);
+const server = app.listen(PORT, "0.0.0.0", () => {
+  log(`Browsnex running → http://localhost:${PORT}`);
+  log(`Max sessions: ${MAX_SESSIONS}, TTL: ${SESSION_TTL/1000}s, Security  mode: ${DOMAIN_MODE}, Mem limit: ${MEM_LIMIT_MB}MB`);
 });
+
+async function shutdown() {
+  log("Shutting down gracefully...");
+  server.close();
+  const cids = Object.keys(sessions);
+  await Promise.all(cids.map(cid => destroySession(cid)));
+  log("All sessions closed. Bye!");
+  process.exit(0);
+}
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT",  shutdown);
