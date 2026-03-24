@@ -1,0 +1,10 @@
+{
+  "port": 3000,
+  "maxSessions": 10,
+  "sessionTTL": 300000,
+  "domainMode": "blacklist",
+  "domains": [
+    "pornhub.com",
+    "evilmalware.com"
+  ]
+}

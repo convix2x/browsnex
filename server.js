@@ -1,14 +1,33 @@
 const express = require("express");
 const puppeteer = require("puppeteer");
 const path = require("path");
+const fs = require("fs");
 
 const app = express();
-const PORT = 3000;
+
+const config = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
+const PORT        = config.port        || 3000;
+const MAX_SESSIONS = config.maxSessions || 10;
+const SESSION_TTL  = config.sessionTTL  || 300000;
+const DOMAIN_MODE  = config.domainMode  || "blacklist";
+const DOMAINS      = (config.domains || []).map(d => d.toLowerCase());
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 const sessions = {};
+
+function checkDomain(url) {
+  let hostname;
+  try { hostname = new URL(url).hostname.toLowerCase(); } catch (_) { return false; }
+  const match = DOMAINS.some(d => hostname === d || hostname.endsWith("." + d));
+  if (DOMAIN_MODE === "whitelist") return match;
+  return !match;
+}
+
+function sessionCount() {
+  return Object.keys(sessions).length;
+}
 
 function writeFrame(res, buf) {
   try {
@@ -25,9 +44,32 @@ function buildUA(clientUA) {
   return "Mozilla/5.0 (" + clientUA + ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 }
 
+async function destroySession(cid) {
+  const s = sessions[cid];
+  if (!s) return;
+  if (s.ttlTimer) clearTimeout(s.ttlTimer);
+  delete sessions[cid];
+  console.log(`[session] closing ${cid}`);
+  try { await s.browser.close(); } catch (_) {}
+}
+
+function touchSession(cid) {
+  const s = sessions[cid];
+  if (!s) return;
+  if (s.ttlTimer) clearTimeout(s.ttlTimer);
+  s.lastSeen = Date.now();
+  s.ttlTimer = setTimeout(() => {
+    if (sessions[cid] && sessions[cid].listeners.size === 0) {
+      console.log(`[session] TTL expired ${cid}`);
+      destroySession(cid);
+    }
+  }, SESSION_TTL);
+}
+
 async function getOrCreateSession(cid, url, width, height, clientUA) {
   if (sessions[cid]) {
     const s = sessions[cid];
+    touchSession(cid);
     if (s.url !== url) {
       s.url = url;
       s.navigating = true;
@@ -39,6 +81,10 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
       s.navigating = false;
     }
     return s;
+  }
+
+  if (sessionCount() >= MAX_SESSIONS) {
+    throw new Error("Max sessions reached (" + MAX_SESSIONS + ")");
   }
 
   const browser = await puppeteer.launch({
@@ -78,6 +124,8 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
     lastFrameMs: 0,
     adjusting: false,
     manualQuality: false,
+    lastSeen: Date.now(),
+    ttlTimer: null,
   };
 
   await cdp.send("Page.startScreencast", {
@@ -135,6 +183,9 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
     }
   });
 
+  sessions[cid] = session;
+  touchSession(cid);
+
   session.navigating = true;
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
@@ -143,16 +194,7 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
   }
   session.navigating = false;
 
-  sessions[cid] = session;
   return session;
-}
-
-async function destroySession(cid) {
-  const s = sessions[cid];
-  if (!s) return;
-  delete sessions[cid];
-  console.log(`[session] closing ${cid}`);
-  try { await s.browser.close(); } catch (_) {}
 }
 
 app.get("/stream", async (req, res) => {
@@ -162,11 +204,48 @@ app.get("/stream", async (req, res) => {
   const height = parseInt(req.query.h) || 667;
   const ua     = req.query.ua || "mobile";
 
+  if (!checkDomain(url)) {
+    let session;
+    try {
+      session = await getOrCreateSession(cid, "about:blank", width, height, ua);
+    } catch (err) {
+      res.status(503).send(err.message);
+      return;
+    }
+    let blockedHtml;
+    try {
+      blockedHtml = fs.readFileSync(path.join(__dirname, "internal", "blocked.html"), "utf8");
+      blockedHtml = blockedHtml.replace(/\{\{hostname\}\}/g, new URL(url).hostname);
+    } catch (_) {
+      blockedHtml = "<h1>Blocked</h1><p>{{hostname}} is not allowed.</p>";
+      blockedHtml = blockedHtml.replace(/\{\{hostname\}\}/g, new URL(url).hostname);
+    }
+    await session.page.goto("data:text/html," + encodeURIComponent(blockedHtml)).catch(() => {});
+    res.writeHead(200, {
+      "Content-Type": "multipart/x-mixed-replace; boundary=--FRAME",
+      "Cache-Control": "no-cache, no-store",
+      "Pragma": "no-cache",
+      "Connection": "close",
+    });
+    session.listeners.add(res);
+    touchSession(cid);
+    let closed = false;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      session.listeners.delete(res);
+      touchSession(cid);
+    };
+    req.on("close", cleanup);
+    req.on("error", cleanup);
+    return;
+  }
+
   let session;
   try {
     session = await getOrCreateSession(cid, url, width, height, ua);
   } catch (err) {
-    res.status(500).send("Failed: " + err.message);
+    res.status(503).send(err.message);
     return;
   }
 
@@ -178,24 +257,29 @@ app.get("/stream", async (req, res) => {
   });
 
   session.listeners.add(res);
+  touchSession(cid);
 
-  var closed = false;
-  var cleanup = function () {
+  let closed = false;
+  const cleanup = () => {
     if (closed) return;
     closed = true;
     session.listeners.delete(res);
-    if (session.listeners.size === 0) {
-      destroySession(cid);
-    }
+    touchSession(cid);
   };
 
   req.on("close", cleanup);
   req.on("error", cleanup);
 });
 
+function getSession(cid) {
+  const s = sessions[cid];
+  if (s) touchSession(cid);
+  return s;
+}
+
 app.post("/input/tap", async (req, res) => {
   const { cid, x, y } = req.body;
-  const session = sessions[cid];
+  const session = getSession(cid);
   if (!session) return res.status(404).end();
   await session.page.evaluate(() => {
     if (document.activeElement) document.activeElement.blur();
@@ -206,7 +290,7 @@ app.post("/input/tap", async (req, res) => {
 
 app.post("/input/scroll", (req, res) => {
   const { cid, dx, dy } = req.body;
-  const session = sessions[cid];
+  const session = getSession(cid);
   if (!session) return res.status(404).end();
   session.page.mouse.wheel({ deltaX: dx, deltaY: dy }).catch(() => {});
   res.end();
@@ -214,7 +298,7 @@ app.post("/input/scroll", (req, res) => {
 
 app.post("/input/type", (req, res) => {
   const { cid, text } = req.body;
-  const session = sessions[cid];
+  const session = getSession(cid);
   if (!session) return res.status(404).end();
   session.page.keyboard.type(text, { delay: 0 }).catch(() => {});
   res.end();
@@ -222,14 +306,14 @@ app.post("/input/type", (req, res) => {
 
 app.post("/input/key", (req, res) => {
   const { cid, key } = req.body;
-  const session = sessions[cid];
+  const session = getSession(cid);
   if (!session) return res.status(404).end();
   session.page.keyboard.press(key).catch(() => {});
   res.end();
 });
 
 app.get("/scrollinfo", async (req, res) => {
-  const session = sessions[req.query.cid];
+  const session = getSession(req.query.cid);
   if (!session) return res.json({ scrollY: 0, scrollHeight: 1000, innerHeight: 667 });
   try {
     const info = await session.page.evaluate(() => ({
@@ -243,15 +327,15 @@ app.get("/scrollinfo", async (req, res) => {
   }
 });
 
-app.post("/input/scrollto", async (req, res) => {
-  const session = sessions[req.body.cid];
+app.post("/input/scrollto", (req, res) => {
+  const session = getSession(req.body.cid);
   if (!session) return res.status(404).end();
-  session.page.evaluate(function (y) { window.scrollTo(0, y); }, req.body.y).catch(() => {});
+  session.page.evaluate((y) => window.scrollTo(0, y), req.body.y).catch(() => {});
   res.end();
 });
 
 app.post("/quality", async (req, res) => {
-  const session = sessions[req.body.cid];
+  const session = getSession(req.body.cid);
   if (!session) return res.status(404).end();
   const preset = req.body.preset;
   const presets = {
@@ -281,28 +365,28 @@ app.post("/quality", async (req, res) => {
 });
 
 app.post("/input/back", (req, res) => {
-  const session = sessions[req.body.cid];
+  const session = getSession(req.body.cid);
   if (!session) return res.status(404).end();
   session.page.goBack().catch(() => {});
   res.end();
 });
 
 app.post("/input/forward", (req, res) => {
-  const session = sessions[req.body.cid];
+  const session = getSession(req.body.cid);
   if (!session) return res.status(404).end();
   session.page.goForward().catch(() => {});
   res.end();
 });
 
 app.post("/input/reload", (req, res) => {
-  const session = sessions[req.body.cid];
+  const session = getSession(req.body.cid);
   if (!session) return res.status(404).end();
   session.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
   res.end();
 });
 
 app.get("/meta", async (req, res) => {
-  const session = sessions[req.query.cid];
+  const session = getSession(req.query.cid);
   if (!session) return res.json({ title: "Browsnex", driftUrl: null });
   try {
     const driftUrl = session.driftUrl;
@@ -322,5 +406,6 @@ app.get("/", (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`\n  Browsnex running → http://localhost:${PORT}\n`);
+  console.log(`\n  Browsnex running → http://localhost:${PORT}`);
+  console.log(`  Security mode: ${DOMAIN_MODE}\n`);
 });
