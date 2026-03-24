@@ -1,0 +1,13 @@
+{
+  "port": 3000, // listening port
+  "maxSessions": 10, // how many sessions you want simultaneously
+  "sessionTTL": 300000, // ttl (aka if a session doesn't respond for long enough it will kill it)
+  "memLimitMb": 1024, // RAM limit
+  "rateWindow": 60000, // ratelimit window
+  "rateMax": 5,
+  "domainMode": "blacklist", // blacklist or whitelist
+  "domains": [
+    "pornhub.com",
+    "evilmalware.com"
+  ]
+}

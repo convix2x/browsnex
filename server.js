@@ -2,20 +2,75 @@ const express = require("express");
 const puppeteer = require("puppeteer");
 const path = require("path");
 const fs = require("fs");
+const dns = require("dns");
+const net = require("net");
 
 const app = express();
 
-const config = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
-const PORT        = config.port        || 3000;
-const MAX_SESSIONS = config.maxSessions || 10;
-const SESSION_TTL  = config.sessionTTL  || 300000;
-const DOMAIN_MODE  = config.domainMode  || "blacklist";
-const DOMAINS      = (config.domains || []).map(d => d.toLowerCase());
+const config = JSON.parse(fs.readFileSync(path.join(__dirname, "config.jsonc"), "utf8"));
+const PORT         = config.port         || 3000;
+const MAX_SESSIONS = config.maxSessions  || 10;
+const SESSION_TTL  = config.sessionTTL   || 300000;
+const DOMAIN_MODE  = config.domainMode   || "blacklist";
+const DOMAINS      = (config.domains     || []).map(d => d.toLowerCase());
+const MEM_LIMIT_MB = config.memLimitMb   || 512;
+const RATE_WINDOW  = config.rateWindow   || 60000;
+const RATE_MAX     = config.rateMax      || 5;
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
 const sessions = {};
+const ratemap  = {};
+
+function log(msg) {
+  console.log(`[${new Date().toISOString()}] ${msg}`);
+}
+
+function rateLimit(ip) {
+  const now = Date.now();
+  if (!ratemap[ip]) ratemap[ip] = [];
+  ratemap[ip] = ratemap[ip].filter(t => now - t < RATE_WINDOW);
+  if (ratemap[ip].length >= RATE_MAX) return false;
+  ratemap[ip].push(now);
+  return true;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const ip in ratemap) {
+    ratemap[ip] = ratemap[ip].filter(t => now - t < RATE_WINDOW);
+    if (!ratemap[ip].length) delete ratemap[ip];
+  }
+}, RATE_WINDOW);
+
+function isPrivateIP(ip) {
+  if (ip === "127.0.0.1" || ip === "::1" || ip === "localhost") return true;
+  const privateRanges = [
+    /^10\./,
+    /^172\.(1[6-9]|2[0-9]|3[01])\./,
+    /^192\.168\./,
+    /^169\.254\./,
+    /^fc00:/,
+    /^fd/,
+    /^fe80:/,
+  ];
+  return privateRanges.some(r => r.test(ip));
+}
+
+async function checkSSRF(url) {
+  let hostname;
+  try { hostname = new URL(url).hostname; } catch (_) { return false; }
+  if (net.isIP(hostname)) {
+    return !isPrivateIP(hostname);
+  }
+  return new Promise((resolve) => {
+    dns.lookup(hostname, (err, address) => {
+      if (err || !address) return resolve(false);
+      resolve(!isPrivateIP(address));
+    });
+  });
+}
 
 function checkDomain(url) {
   let hostname;
@@ -44,12 +99,26 @@ function buildUA(clientUA) {
   return "Mozilla/5.0 (" + clientUA + ") AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 }
 
+function loadInternalPage(name, vars) {
+  let html;
+  try {
+    html = fs.readFileSync(path.join(__dirname, "internal", name), "utf8");
+  } catch (_) {
+    html = "<h1>{{title}}</h1>";
+  }
+  for (const [k, v] of Object.entries(vars)) {
+    html = html.replace(new RegExp(`\\{\\{${k}\\}\\}`, "g"), v);
+  }
+  return html;
+}
+
 async function destroySession(cid) {
   const s = sessions[cid];
   if (!s) return;
   if (s.ttlTimer) clearTimeout(s.ttlTimer);
+  if (s.memTimer) clearInterval(s.memTimer);
   delete sessions[cid];
-  console.log(`[session] closing ${cid}`);
+  log(`[session] closing ${cid}`);
   try { await s.browser.close(); } catch (_) {}
 }
 
@@ -60,7 +129,7 @@ function touchSession(cid) {
   s.lastSeen = Date.now();
   s.ttlTimer = setTimeout(() => {
     if (sessions[cid] && sessions[cid].listeners.size === 0) {
-      console.log(`[session] TTL expired ${cid}`);
+      log(`[session] TTL expired ${cid}`);
       destroySession(cid);
     }
   }, SESSION_TTL);
@@ -76,7 +145,7 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
       try {
         await s.page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
       } catch (e) {
-        console.error("[nav]", e.message);
+        log(`[nav] ${e.message}`);
       }
       s.navigating = false;
     }
@@ -99,6 +168,7 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
       "--disable-default-apps",
       "--no-first-run",
       "--disable-blink-features=AutomationControlled",
+      `--js-flags=--max-old-space-size=${MEM_LIMIT_MB}`,
       `--window-size=${width},${height}`,
     ],
   });
@@ -126,6 +196,7 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
     manualQuality: false,
     lastSeen: Date.now(),
     ttlTimer: null,
+    memTimer: null,
   };
 
   await cdp.send("Page.startScreencast", {
@@ -183,6 +254,36 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
     }
   });
 
+  browser.on("disconnected", () => {
+    if (!sessions[cid]) return;
+    log(`[crash] browser disconnected for ${cid}, recovering...`);
+    const listeners = [...session.listeners];
+    destroySession(cid);
+    if (listeners.length > 0) {
+      getOrCreateSession(cid, session.url, width, height, clientUA)
+        .then(s => {
+          for (const res of listeners) s.listeners.add(res);
+        })
+        .catch(e => log(`[crash] recovery failed: ${e.message}`));
+    }
+  });
+
+  session.memTimer = setInterval(async () => {
+    try {
+      const metrics = await cdp.send("Performance.getMetrics");
+      const jsHeap = metrics.metrics.find(m => m.name === "JSHeapUsedSize");
+      if (jsHeap && jsHeap.value > MEM_LIMIT_MB * 1024 * 1024) {
+        log(`[mem] session ${cid} exceeded ${MEM_LIMIT_MB}MB, closing`);
+        for (const res of session.listeners) {
+          try { res.end(); } catch (_) {}
+        }
+        destroySession(cid);
+      }
+    } catch (_) {}
+  }, 30000);
+
+  await cdp.send("Performance.enable").catch(() => {});
+
   sessions[cid] = session;
   touchSession(cid);
 
@@ -190,54 +291,62 @@ async function getOrCreateSession(cid, url, width, height, clientUA) {
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
   } catch (e) {
-    console.error("[nav]", e.message);
+    log(`[nav] ${e.message}`);
   }
   session.navigating = false;
 
   return session;
 }
 
+async function streamResponse(req, res, session, cid) {
+  res.writeHead(200, {
+    "Content-Type": "multipart/x-mixed-replace; boundary=--FRAME",
+    "Cache-Control": "no-cache, no-store",
+    "Pragma": "no-cache",
+    "Connection": "close",
+  });
+  session.listeners.add(res);
+  touchSession(cid);
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    session.listeners.delete(res);
+    touchSession(cid);
+  };
+  req.on("close", cleanup);
+  req.on("error", cleanup);
+}
+
 app.get("/stream", async (req, res) => {
+  const ip     = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
   const url    = req.query.url || "https://earth.nullschool.net";
   const cid    = req.query.cid || "default";
   const width  = parseInt(req.query.w) || 375;
   const height = parseInt(req.query.h) || 667;
   const ua     = req.query.ua || "mobile";
 
+  if (!rateLimit(ip)) {
+    res.status(429).send("Too many sessions — try again later");
+    return;
+  }
+
+  const ssrfOk = await checkSSRF(url);
+  if (!ssrfOk) {
+    let session;
+    try { session = await getOrCreateSession(cid, "about:blank", width, height, ua); } catch (e) { res.status(503).send(e.message); return; }
+    const html = loadInternalPage("blocked.html", { hostname: "private/internal address" });
+    await session.page.goto("data:text/html," + encodeURIComponent(html)).catch(() => {});
+    await streamResponse(req, res, session, cid);
+    return;
+  }
+
   if (!checkDomain(url)) {
     let session;
-    try {
-      session = await getOrCreateSession(cid, "about:blank", width, height, ua);
-    } catch (err) {
-      res.status(503).send(err.message);
-      return;
-    }
-    let blockedHtml;
-    try {
-      blockedHtml = fs.readFileSync(path.join(__dirname, "internal", "blocked.html"), "utf8");
-      blockedHtml = blockedHtml.replace(/\{\{hostname\}\}/g, new URL(url).hostname);
-    } catch (_) {
-      blockedHtml = "<h1>Blocked</h1><p>{{hostname}} is not allowed.</p>";
-      blockedHtml = blockedHtml.replace(/\{\{hostname\}\}/g, new URL(url).hostname);
-    }
-    await session.page.goto("data:text/html," + encodeURIComponent(blockedHtml)).catch(() => {});
-    res.writeHead(200, {
-      "Content-Type": "multipart/x-mixed-replace; boundary=--FRAME",
-      "Cache-Control": "no-cache, no-store",
-      "Pragma": "no-cache",
-      "Connection": "close",
-    });
-    session.listeners.add(res);
-    touchSession(cid);
-    let closed = false;
-    const cleanup = () => {
-      if (closed) return;
-      closed = true;
-      session.listeners.delete(res);
-      touchSession(cid);
-    };
-    req.on("close", cleanup);
-    req.on("error", cleanup);
+    try { session = await getOrCreateSession(cid, "about:blank", width, height, ua); } catch (e) { res.status(503).send(e.message); return; }
+    const html = loadInternalPage("blocked.html", { hostname: new URL(url).hostname });
+    await session.page.goto("data:text/html," + encodeURIComponent(html)).catch(() => {});
+    await streamResponse(req, res, session, cid);
     return;
   }
 
@@ -249,26 +358,7 @@ app.get("/stream", async (req, res) => {
     return;
   }
 
-  res.writeHead(200, {
-    "Content-Type": "multipart/x-mixed-replace; boundary=--FRAME",
-    "Cache-Control": "no-cache, no-store",
-    "Pragma": "no-cache",
-    "Connection": "close",
-  });
-
-  session.listeners.add(res);
-  touchSession(cid);
-
-  let closed = false;
-  const cleanup = () => {
-    if (closed) return;
-    closed = true;
-    session.listeners.delete(res);
-    touchSession(cid);
-  };
-
-  req.on("close", cleanup);
-  req.on("error", cleanup);
+  await streamResponse(req, res, session, cid);
 });
 
 function getSession(cid) {
@@ -281,9 +371,7 @@ app.post("/input/tap", async (req, res) => {
   const { cid, x, y } = req.body;
   const session = getSession(cid);
   if (!session) return res.status(404).end();
-  await session.page.evaluate(() => {
-    if (document.activeElement) document.activeElement.blur();
-  }).catch(() => {});
+  await session.page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); }).catch(() => {});
   session.page.mouse.click(x, y).catch(() => {});
   res.end();
 });
@@ -319,7 +407,7 @@ app.get("/scrollinfo", async (req, res) => {
     const info = await session.page.evaluate(() => ({
       scrollY: window.scrollY,
       scrollHeight: document.body.scrollHeight,
-      innerHeight: window.innerHeight
+      innerHeight: window.innerHeight,
     }));
     res.json(info);
   } catch (_) {
@@ -364,26 +452,9 @@ app.post("/quality", async (req, res) => {
   res.end();
 });
 
-app.post("/input/back", (req, res) => {
-  const session = getSession(req.body.cid);
-  if (!session) return res.status(404).end();
-  session.page.goBack().catch(() => {});
-  res.end();
-});
-
-app.post("/input/forward", (req, res) => {
-  const session = getSession(req.body.cid);
-  if (!session) return res.status(404).end();
-  session.page.goForward().catch(() => {});
-  res.end();
-});
-
-app.post("/input/reload", (req, res) => {
-  const session = getSession(req.body.cid);
-  if (!session) return res.status(404).end();
-  session.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
-  res.end();
-});
+app.post("/input/back",    (req, res) => { const s = getSession(req.body.cid); if (!s) return res.status(404).end(); s.page.goBack().catch(() => {}); res.end(); });
+app.post("/input/forward", (req, res) => { const s = getSession(req.body.cid); if (!s) return res.status(404).end(); s.page.goForward().catch(() => {}); res.end(); });
+app.post("/input/reload",  (req, res) => { const s = getSession(req.body.cid); if (!s) return res.status(404).end(); s.page.reload({ waitUntil: "domcontentloaded" }).catch(() => {}); res.end(); });
 
 app.get("/meta", async (req, res) => {
   const session = getSession(req.query.cid);
@@ -406,6 +477,6 @@ app.get("/", (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`\n  Browsnex running → http://localhost:${PORT}`);
-  console.log(`  Security mode: ${DOMAIN_MODE}\n`);
+  log(`  Browsnex running → http://localhost:${PORT}`);
+  log(`  Max sessions: ${MAX_SESSIONS}, TTL: ${SESSION_TTL/1000}s, Security mode: ${DOMAIN_MODE}, Mem limit: ${MEM_LIMIT_MB}MB`);
 });
