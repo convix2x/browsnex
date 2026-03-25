@@ -372,8 +372,7 @@ app.get("/stream", async (req, res) => {
   if (!ssrfOk) {
     let session;
     try { session = await getOrCreateSession(cid, "about:blank", width, height, ua); } catch (e) { return res.status(503).send(e.message); }
-    const html = loadInternalPage("blocked.html", { hostname: "private/internal address" });
-    await session.page.goto("data:text/html," + encodeURIComponent(html)).catch(() => {});
+    await session.page.goto(`http://localhost:${PORT}/internal/blocked?hostname=private%2Finternal+address`).catch(() => {});
     await streamResponse(req, res, session, cid);
     return;
   }
@@ -381,8 +380,7 @@ app.get("/stream", async (req, res) => {
   if (!checkDomain(url)) {
     let session;
     try { session = await getOrCreateSession(cid, "about:blank", width, height, ua); } catch (e) { return res.status(503).send(e.message); }
-    const html = loadInternalPage("blocked.html", { hostname: new URL(url).hostname });
-    await session.page.goto("data:text/html," + encodeURIComponent(html)).catch(() => {});
+    await session.page.goto(`http://localhost:${PORT}/internal/blocked?hostname=${encodeURIComponent(new URL(url).hostname)}`).catch(() => {});
     await streamResponse(req, res, session, cid);
     return;
   }
@@ -523,6 +521,14 @@ app.get("/meta", async (req, res) => {
   }
 });
 
+app.get("/internal/blocked", (req, res) => {
+  const hostname = sanitizeText(req.query.hostname, 253) || "unknown";
+  const html = loadInternalPage("blocked.html", { hostname });
+  res.setHeader("Content-Type", "text/html");
+  res.send(html);
+});
+
+
 app.get("/", (req, res) => {
   if (req.query.url) {
     res.sendFile(path.join(__dirname, "public", "browser.html"));
@@ -533,7 +539,7 @@ app.get("/", (req, res) => {
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   log(`Browsnex running → http://localhost:${PORT}`);
-  log(`Max sessions: ${MAX_SESSIONS}, TTL: ${SESSION_TTL/1000}s, Security  mode: ${DOMAIN_MODE}, Mem limit: ${MEM_LIMIT_MB}MB`);
+  log(`Max sessions: ${MAX_SESSIONS}, TTL: ${SESSION_TTL/1000}s, Domain mode: ${DOMAIN_MODE}, Mem limit: ${MEM_LIMIT_MB}MB`);
 });
 
 async function shutdown() {
