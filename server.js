@@ -395,6 +395,36 @@ app.get("/stream", async (req, res) => {
   await streamResponse(req, res, session, cid);
 });
 
+app.get("/screen.jpg", async (req, res) => {
+  try {
+    const url = sanitizeUrl(req.query.url || "https://earth.nullschool.net");
+    const cid = sanitizeCid(req.query.cid || "default");
+    const width = sanitizeInt(req.query.w, 100, 3840, 320);
+    const height = sanitizeInt(req.query.h, 100, 2160, 180);
+    const ua = sanitizeText(req.query.ua, 200) || "mobile";
+
+    if (!url || !cid) return res.status(400).send("Invalid parameters");
+
+    const session = await getOrCreateSession(cid, url, width, height, ua);
+    await session.page.setViewport({
+      width: 640,
+      height: 360
+    });
+
+    const buffer = await session.page.screenshot({
+      type: "jpeg",
+      quality: 35
+    });
+
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.send(buffer);
+  } catch (err) {
+    console.error("screen.jpg error:", err);
+    res.status(500).send("screenshot failed: " + err.message);
+  }
+});
+
 function getSession(cid) {
   const s = sessions[cid];
   if (s) touchSession(cid);
