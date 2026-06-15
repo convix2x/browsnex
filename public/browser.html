@@ -15,65 +15,60 @@
     }
 
     #toolbar {
-      display: -webkit-box;
-      display: -webkit-flex;
-      display: flex;
-      -webkit-box-align: center;
-      -webkit-align-items: center;
-      align-items: center;
+      display: block;
       padding: 5px 6px;
-      gap: 4px;
-      background: -webkit-linear-gradient(top, #587397, #384963);
-      background: linear-gradient(to bottom, #587397, #384963);
+      white-space: nowrap;
+      background: #384963;
+      background: -webkit-gradient(linear, left top, left bottom, from(#587397), to(#384963));
     }
 
     #url-input {
-      -webkit-box-flex: 1;
-      -webkit-flex: 1;
-      flex: 1;
+      display: inline-block;
+      width: 120px;
       min-width: 0;
       font-size: 14px;
       height: 30px;
       border-radius: 8px;
       padding: 0 8px;
+      vertical-align: middle;
     }
 
     #go-btn {
+      display: inline-block;
       background-image: url('/button.png');
       background-size: 100% 100%;
       background-repeat: no-repeat;
       background-color: transparent;
       border: none;
       height: 30px;
-      width: 56px;
+      width: 40px;
       font-size: 12px;
       font-weight: bold;
       color: #fff;
-      text-shadow: 0 1px 2px rgba(0,0,0,0.6);
       padding: 0;
       line-height: 30px;
       text-align: center;
-      -webkit-flex-shrink: 0;
-      flex-shrink: 0;
+      vertical-align: middle;
+      margin-left: 4px;
     }
 
     #kbd-btn, #menu-btn {
+      display: inline-block;
       background-image: url('/buttoncircle.png');
       background-size: 100% 100%;
       background-repeat: no-repeat;
       background-color: transparent;
       border: none;
-      width: 30px;
-      height: 30px;
+      width: 24px;
+      height: 24px;
       font-size: 15px;
       color: #fff;
-      text-shadow: 0 1px 2px rgba(0,0,0,0.6);
       padding: 0;
-      line-height: 30px;
+      line-height: 24px;
       text-align: center;
       white-space: nowrap;
-      -webkit-flex-shrink: 0;
-      flex-shrink: 0;
+      vertical-align: middle;
+      margin-left: 4px;
     }
 
     #menu {
@@ -99,29 +94,32 @@
     }
 
     #scrollbar-track {
-      display: none;
+      display: block !important;
       position: fixed;
       right: 0;
-      top: 0;
-      width: 16px;
+      top: 34px;
+      width: 20px;
+      bottom: 0;
       overflow-y: scroll;
       overflow-x: hidden;
-      bottom: 0;
-      z-index: 50;
+      z-index: 9999;
+      background: rgba(255,0,0,0.25);
     }
 
     #scrollbar-thumb {
-      width: 1px;
+      width: 20px;
       min-height: 2000px;
+      background: #fff;
     }
 
     #stream {
       display: block;
       position: absolute;
       left: 0;
-      right: 0;
-      bottom: 0;
-      width: 100%;
+      top: 35px;
+      width: 300px;
+      height: 180px;
+      object-fit: contain;
       -webkit-user-select: none;
       user-select: none;
       -webkit-touch-callout: none;
@@ -143,6 +141,10 @@
     >
     <button id="go-btn" type="button">Go</button>
     <button id="kbd-btn" type="button">⌨️</button>
+    <button id="enter-btn">↵</button>
+    <button id="send-kbd-btn" type="button">Send</button>
+    <button id="scroll-up-btn" type="button">▲</button>
+    <button id="scroll-down-btn" type="button">▼</button> 
     <button id="menu-btn" type="button">☰</button>
   </div>
 
@@ -161,14 +163,23 @@
 
   <img id="stream" src="" alt="">
   <div id="scrollbar-track"><div id="scrollbar-thumb"></div></div>
-  <input id="kbd" type="text" style="position:fixed;left:0;top:0;width:100%;height:100%;opacity:0;z-index:-1;" autocorrect="off" autocapitalize="none" autocomplete="off" spellcheck="false">
+  <input id="kbd" type="text" style="position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;opacity:0;" autocorrect="off" autocapitalize="none" autocomplete="off" spellcheck="false">
 
 <script>
 (function () {
 
-  var isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
-  var W       = isTouch ? window.screen.width : window.innerWidth;
-  var H       = isTouch ? window.screen.height : window.innerHeight;
+  var uaString = navigator.userAgent || "";
+  var is3DS = /Nintendo|3DS/i.test(uaString);
+  var isTouch = is3DS;
+  console.log("isTouch =", isTouch);
+  console.log(
+    "ontouchstart:",
+    ('ontouchstart' in window),
+    "maxTouchPoints:",
+    navigator.maxTouchPoints
+  );
+  var W       = 640;
+  var H       = 360;
 
   var input     = document.getElementById("url-input");
   var goBtn     = document.getElementById("go-btn");
@@ -178,7 +189,11 @@
   var backBtn   = document.getElementById("back-btn");
   var fwdBtn    = document.getElementById("fwd-btn");
   var reloadBtn    = document.getElementById("reload-btn");
+  var scrollUpBtn = document.getElementById("scroll-up-btn");
+  var scrollDownBtn = document.getElementById("scroll-down-btn");
   var homeBtn      = document.getElementById("home-btn");
+  var enterBtn = document.getElementById("enter-btn");
+  var sendKbdBtn = document.getElementById("send-kbd-btn");
   var qualitySelect = document.getElementById("quality-select");
   var stream    = document.getElementById("stream");
   var toolbar   = document.getElementById("toolbar");
@@ -253,6 +268,58 @@
     sbTrack.onscroll = sbOnScroll;
   }
 
+  sbTrack.onclick = function (e) {
+    var r = sbTrack.getBoundingClientRect();
+    var y = e.clientY - r.top;
+
+    if (y < r.height / 2) {
+      post("/input/scroll", { cid: cid, dx: 0, dy: -300 });
+    } else {
+      post("/input/scroll", { cid: cid, dx: 0, dy: 300 });
+    }
+
+    return false;
+  };
+
+  sbTrack.ontouchend = function (e) {
+    e.preventDefault();
+
+    var t = e.changedTouches[0];
+    var r = sbTrack.getBoundingClientRect();
+    var y = t.clientY - r.top;
+
+    if (y < r.height / 2) {
+      post("/input/scroll", { cid: cid, dx: 0, dy: -300 });
+    } else {
+      post("/input/scroll", { cid: cid, dx: 0, dy: 300 });
+    }
+
+    return false;
+  };
+
+  var sbTouchY = 0;
+
+  sbTrack.ontouchstart = function (e) {
+    var t = e.touches[0];
+    sbTouchY = t.clientY;
+  };
+
+  sbTrack.ontouchmove = function (e) {
+    e.preventDefault();
+
+    var t = e.touches[0];
+    var dy = t.clientY - sbTouchY;
+    sbTouchY = t.clientY;
+
+    post("/input/scroll", {
+      cid: cid,
+      dx: 0,
+      dy: dy * 6
+    });
+
+    return false;
+  };
+
   function layoutStream() {
     var tbRect = toolbar.getBoundingClientRect();
     var top = tbRect.bottom;
@@ -266,7 +333,8 @@
 
   layoutStream();
   window.onresize = function () {
-    W = window.innerWidth;
+    W = 320;
+    H = 180;
     layoutStream();
   };
 
@@ -288,16 +356,23 @@
     xhr.send(JSON.stringify(data));
   }
 
+  var screenTimer = null;
+
   function startStream(url) {
-    var tbRect  = toolbar.getBoundingClientRect();
-    var streamH = window.innerHeight - tbRect.bottom;
-    stream.src = "/stream"
-      + "?url=" + encodeURIComponent(url)
-      + "&cid=" + cid
-      + "&ua="  + encodeURIComponent(clientUA())
-      + "&w="   + W
-      + "&h="   + Math.round(streamH);
-    stream.onload = layoutStream;
+    if (screenTimer) clearInterval(screenTimer);
+
+    function refresh() {
+      stream.src = "/screen.jpg"
+        + "?url=" + encodeURIComponent(url)
+        + "&cid=" + cid
+        + "&ua=" + encodeURIComponent(clientUA())
+        + "&w=320"
+        + "&h=180"
+        + "&t=" + Date.now();
+    }
+
+    refresh();
+    screenTimer = setInterval(refresh, 400);
   }
 
   function navigate(url) {
@@ -322,7 +397,56 @@
   kbdBtn.onclick = function () {
     kbdVal = "";
     kbd.value = "";
+    kbd.style.position = "absolute";
+    kbd.style.left = "5px";
+    kbd.style.top = "45px";
+    kbd.style.width = "180px";
+    kbd.style.height = "25px";
+    kbd.style.opacity = "1";
+    kbd.style.zIndex = "999";
     kbd.focus();
+  };
+
+  enterBtn.onclick = function () {
+    post("/input/key", {
+      cid: cid,
+      key: "Enter"
+    });
+  };
+
+  sendKbdBtn.onclick = function () {
+    post("/input/type", {
+      cid: cid,
+      text: kbd.value
+    });
+
+    kbd.value = "";
+  };
+
+  function scrollRemote(dy) {
+    post("/input/scroll", {
+      cid: cid,
+      dx: 0,
+      dy: dy
+    });
+  }
+
+  scrollUpBtn.onclick = function () {
+    scrollRemote(-350);
+  };
+
+  scrollDownBtn.onclick = function () {
+    scrollRemote(350);
+  };
+
+  scrollUpBtn.ontouchend = function (e) {
+    e.preventDefault();
+    scrollRemote(-350);
+  };
+
+  scrollDownBtn.ontouchend = function (e) {
+    e.preventDefault();
+    scrollRemote(350);
   };
 
   menuBtn.onclick = function () { toggleMenu(); };
@@ -398,6 +522,18 @@
   function streamCoords(clientX, clientY) {
     var r  = stream.getBoundingClientRect();
     var sc = W / r.width;
+    console.log(
+      "click",
+      clientX,
+      clientY,
+      "rect",
+      r.width,
+      r.height,
+      "W",
+      W,
+      "H",
+      H
+    );
     return {
       x: Math.round((clientX - r.left) * sc),
       y: Math.round((clientY - r.top)  * sc)
@@ -406,7 +542,10 @@
 
   if (isTouch) {
     stream.addEventListener("touchstart", function (e) {
+      console.log("TOUCH START FIRED");
+      input.blur();
       e.preventDefault();
+      e.stopPropagation();
       if (menuOpen) { closeMenu(); return; }
       var t = e.touches[0];
       touchStartX = t.clientX;
@@ -431,35 +570,53 @@
       touchStartY = t.clientY;
     }, false);
 
+    function handleTap(clientX, clientY) {
+      if (menuOpen) { closeMenu(); return; }
+
+      var c = streamCoords(clientX, clientY);
+      post("/input/tap", { cid: cid, x: c.x, y: c.y });
+      pollMeta(true);
+    }
+
+    stream.onclick = function (e) {
+      handleTap(e.clientX, e.clientY);
+    };
+
     stream.addEventListener("touchend", function (e) {
       e.preventDefault();
-      if (menuOpen) return;
-      var t  = e.changedTouches[0];
-      var dx = Math.abs(t.clientX - touchStartX);
-      var dy = Math.abs(t.clientY - touchStartY);
-      if (dx < 10 && dy < 10) {
-        var c = streamCoords(t.clientX, t.clientY);
-        post("/input/tap", { cid: cid, x: c.x, y: c.y });
-        pollMeta(true);
-      }
+      e.stopPropagation();
+
+      var t = e.changedTouches[0];
+      handleTap(t.clientX, t.clientY);
+
+      return false;
     }, false);
 
-    kbd.oninput = function () {
-      var next = kbd.value;
-      if (next.length > kbdVal.length) {
-        post("/input/type", { cid: cid, text: next.slice(kbdVal.length) });
+    kbd.onchange = function () {
+      alert("changed: " + kbd.value);
+
+      if (kbd.value.length > 0) {
+        post("/input/type", {
+          cid: cid,
+          text: kbd.value
+        });
+
+        kbd.value = "";
       }
-      kbdVal = next;
     };
 
     kbd.onkeydown = function (e) {
       var code = e.keyCode || e.which;
-      if (code === 8)  post("/input/key", { cid: cid, key: "Backspace" });
-      if (code === 13) post("/input/key", { cid: cid, key: "Enter" });
-      if (code === 37) post("/input/key", { cid: cid, key: "ArrowLeft" });
-      if (code === 38) post("/input/key", { cid: cid, key: "ArrowUp" });
-      if (code === 39) post("/input/key", { cid: cid, key: "ArrowRight" });
-      if (code === 40) post("/input/key", { cid: cid, key: "ArrowDown" });
+
+      if (code === 13) {
+        post("/input/key", { cid: cid, key: "Enter" });
+
+        kbd.style.left = "-9999px";
+        kbd.style.top = "-9999px";
+        kbd.style.opacity = "0";
+      }
+
+      if (code === 8) post("/input/key", { cid: cid, key: "Backspace" });
     };
 
   } else {
